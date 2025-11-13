@@ -364,7 +364,7 @@ class CarrierTracker:
 
     def track_carrier(self, x0: float, y0: float, z0: float,
                      carrier_type: str,
-                     dt_initial: float = 1e-12,
+                     dt_initial: float = 1e-11,  # 1e-12→1e-11に変更（10倍高速化）
                      save_trajectory: bool = False) -> Tuple[bool, Optional[np.ndarray]]:
         """
         単一キャリアの軌道を追跡
@@ -441,7 +441,8 @@ class CarrierTracker:
     def _rk4_step(self, x: float, y: float, z: float, dt: float,
                   mu: float, sign: int) -> Tuple[float, float, float, float]:
         """
-        Runge-Kutta 4次法で1ステップ進める
+        Runge-Kutta 2次法（midpoint法）で1ステップ進める
+        高速化のためRK4→RK2に変更（補間回数: 4回→2回）
 
         Returns:
         --------
@@ -450,68 +451,45 @@ class CarrierTracker:
         dt_new : float
             次のステップサイズ [s]
         """
-        # k1
+        # k1: 現在位置での速度
         Ex1, Ey1, Ez1 = self.field.get_field(x, y, z)
         vx1 = sign * mu * Ex1
         vy1 = sign * mu * Ey1
         vz1 = sign * mu * Ez1
 
-        # k2
-        x2 = x + 0.5 * dt * vx1
-        y2 = y + 0.5 * dt * vy1
-        z2 = z + 0.5 * dt * vz1
-        if not self.field.is_in_bounds(x2, y2, z2):
+        # k2: 中点での速度
+        x_mid = x + 0.5 * dt * vx1
+        y_mid = y + 0.5 * dt * vy1
+        z_mid = z + 0.5 * dt * vz1
+
+        if not self.field.is_in_bounds(x_mid, y_mid, z_mid):
+            # 境界外なら1次で近似
             return x + dt * vx1, y + dt * vy1, z + dt * vz1, dt
 
-        Ex2, Ey2, Ez2 = self.field.get_field(x2, y2, z2)
-        vx2 = sign * mu * Ex2
-        vy2 = sign * mu * Ey2
-        vz2 = sign * mu * Ez2
+        Ex_mid, Ey_mid, Ez_mid = self.field.get_field(x_mid, y_mid, z_mid)
+        vx_mid = sign * mu * Ex_mid
+        vy_mid = sign * mu * Ey_mid
+        vz_mid = sign * mu * Ez_mid
 
-        # k3
-        x3 = x + 0.5 * dt * vx2
-        y3 = y + 0.5 * dt * vy2
-        z3 = z + 0.5 * dt * vz2
-        if not self.field.is_in_bounds(x3, y3, z3):
-            return x + dt * vx1, y + dt * vy1, z + dt * vz1, dt
-
-        Ex3, Ey3, Ez3 = self.field.get_field(x3, y3, z3)
-        vx3 = sign * mu * Ex3
-        vy3 = sign * mu * Ey3
-        vz3 = sign * mu * Ez3
-
-        # k4
-        x4 = x + dt * vx3
-        y4 = y + dt * vy3
-        z4 = z + dt * vz3
-        if not self.field.is_in_bounds(x4, y4, z4):
-            return x + dt * vx1, y + dt * vy1, z + dt * vz1, dt
-
-        Ex4, Ey4, Ez4 = self.field.get_field(x4, y4, z4)
-        vx4 = sign * mu * Ex4
-        vy4 = sign * mu * Ey4
-        vz4 = sign * mu * Ez4
-
-        # 位置の更新
-        x_new = x + (dt / 6.0) * (vx1 + 2*vx2 + 2*vx3 + vx4)
-        y_new = y + (dt / 6.0) * (vy1 + 2*vy2 + 2*vy3 + vy4)
-        z_new = z + (dt / 6.0) * (vz1 + 2*vz2 + 2*vz3 + vz4)
+        # 中点での速度を使って更新
+        x_new = x + dt * vx_mid
+        y_new = y + dt * vy_mid
+        z_new = z + dt * vz_mid
 
         # 適応的時間ステップ（電界が強い場所では小さく）
         E_mag = np.sqrt(Ex1**2 + Ey1**2 + Ez1**2)
         v_mag = mu * E_mag
 
         if v_mag > 0:
-            # 1ステップで進む距離を適切に制限
-            # グリッドサイズの1/10程度を目安
+            # 1ステップで進む距離を制限（グリッドサイズの1/5に拡大）
             grid_size = min(
                 self.field.X[1] - self.field.X[0] if len(self.field.X) > 1 else 1e-6,
                 self.field.Y[1] - self.field.Y[0] if len(self.field.Y) > 1 else 1e-6,
                 self.field.Z[1] - self.field.Z[0] if len(self.field.Z) > 1 else 1e-6
             )
-            target_step = 0.1 * grid_size
-            dt_new = min(target_step / v_mag, dt * 2.0, 1e-10)
-            dt_new = max(dt_new, 1e-14)  # 最小ステップサイズ
+            target_step = 0.2 * grid_size  # 0.1→0.2に拡大
+            dt_new = min(target_step / v_mag, dt * 2.0, 1e-9)  # 最大dtを10倍に
+            dt_new = max(dt_new, 1e-13)  # 最小ステップサイズも10倍に
         else:
             dt_new = dt
 
@@ -933,8 +911,8 @@ def main():
     # srim_file = 'data/5486keVαinSiCIONIZ.txt'
 
     # シミュレーションパラメータ
-    sampling_ratio = 0.001  # 0.1% サンプリング
-    n_events = 10           # イベント数
+    sampling_ratio = 0.0001  # 0.01% サンプリング (約70対/イベント)
+    n_events = 10000         # イベント数
 
     # ==================== 検出器構成リスト ====================
 
