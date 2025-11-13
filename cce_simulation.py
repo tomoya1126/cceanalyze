@@ -287,14 +287,14 @@ class SRIMDataLoader:
         positions = []
 
         for alpha_idx in range(n_alpha):
-            # 入射位置の決定
+            # 入射位置の決定（x, y方向はランダム、z方向は固定）
             if incident_x is None or incident_y is None:
                 if field_interp is not None:
-                    # フィールドの範囲内でランダム（中央付近）
+                    # フィールドの全範囲でランダム
                     x_range = field_interp.x_max - field_interp.x_min
                     y_range = field_interp.y_max - field_interp.y_min
-                    x0 = field_interp.x_min + 0.5 * x_range + (np.random.rand() - 0.5) * 0.3 * x_range
-                    y0 = field_interp.y_min + 0.5 * y_range + (np.random.rand() - 0.5) * 0.3 * y_range
+                    x0 = field_interp.x_min + np.random.rand() * x_range
+                    y0 = field_interp.y_min + np.random.rand() * y_range
                 else:
                     x0, y0 = 0.0, 0.0
             else:
