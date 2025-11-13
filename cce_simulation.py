@@ -971,8 +971,19 @@ def main():
         print("STEP 3: Comparison with experimental data")
         print("="*70)
 
-        exp_data = pd.read_csv(exp_file)
+        # タブ区切り（TSV）またはカンマ区切り（CSV）を自動判定
+        try:
+            # まずタブ区切りを試す
+            exp_data = pd.read_csv(exp_file, sep='\t')
+            if len(exp_data.columns) == 1:
+                # 1列しかない場合はカンマ区切りを試す
+                exp_data = pd.read_csv(exp_file, sep=',')
+        except:
+            # カンマ区切りで再試行
+            exp_data = pd.read_csv(exp_file, sep=',')
+
         print(f"Loaded experimental data: {len(exp_data)} events")
+        print(f"Columns: {list(exp_data.columns)}")
 
         Visualizer.plot_experiment_comparison(
             results_multiple, exp_data,
