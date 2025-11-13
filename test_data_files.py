@@ -276,13 +276,18 @@ def main():
     print("="*60)
 
     # ファイルパス（cce_simulation.pyと同じ）
-    field_files = [
-        ('横型', '電界/yokogata_field.npz'),
-        ('くし形', '電界/kushigata_field.npz')
-    ]
     # Windows: 実際の環境のパス
+    field_files = [
+        ('横型', r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz'),
+        ('くし形', r'C:\Users\discu\デスクトップ\python\cce\電界\kushigata_field.npz')
+    ]
     srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
+
     # Linux/Mac: 相対パスを使う場合はこちらをコメント解除
+    # field_files = [
+    #     ('横型', '電界/yokogata_field.npz'),
+    #     ('くし形', '電界/kushigata_field.npz')
+    # ]
     # srim_file = 'data/5486keVαinSiCIONIZ.txt'
 
     # チェック実行

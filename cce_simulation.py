@@ -942,17 +942,19 @@ def main():
     detector_configs = [
         {
             'name': '横型',
-            'field_file': '電界/yokogata_field.npz',
+            # Windows: 実際の環境のパス
+            'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz',
             'output_prefix': 'yokogata_',
-            # Windows パス（必要に応じてコメント外す）
-            # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz',
+            # Linux/Mac: 相対パスを使う場合はこちらをコメント解除
+            # 'field_file': '電界/yokogata_field.npz',
         },
         {
             'name': 'くし形',
-            'field_file': '電界/kushigata_field.npz',
+            # Windows: 実際の環境のパス
+            'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\kushigata_field.npz',
             'output_prefix': 'kushigata_',
-            # Windows パス（必要に応じてコメント外す）
-            # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\kushigata_field.npz',
+            # Linux/Mac: 相対パスを使う場合はこちらをコメント解除
+            # 'field_file': '電界/kushigata_field.npz',
         }
     ]
 
