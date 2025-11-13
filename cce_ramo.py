@@ -257,9 +257,14 @@ if NUMBA_AVAILABLE:
         -----
         ホットループ: nb.prange で並列化。
         均一グリッドを仮定（dx=dy=dz）。
+
+        FIXED: 各スレッドのlocal_max_diffを配列に保存してから max() を取る。
+        parallel=True で共有スカラー変数を更新するとrace conditionが発生する。
         """
         nz, ny, nx = phi_w.shape
-        max_diff = 0.0
+
+        # 各z層（スレッド）のmax_diffを保存する配列
+        thread_max_diffs = np.zeros(nz, dtype=np.float64)
 
         # z方向は並列化（データ競合を避けるため）
         for k in nb.prange(1, nz-1):
@@ -285,10 +290,11 @@ if NUMBA_AVAILABLE:
                     if diff > local_max_diff:
                         local_max_diff = diff
 
-            # グローバル最大差分更新（スレッドセーフ）
-            if local_max_diff > max_diff:
-                max_diff = local_max_diff
+            # 各スレッドの結果を配列に保存（これはスレッドセーフ）
+            thread_max_diffs[k] = local_max_diff
 
+        # 全スレッドの結果から最大値を取る
+        max_diff = thread_max_diffs.max()
         return max_diff
 
 
@@ -367,6 +373,21 @@ def solve_weighting_potential(
     # 固定セル（電極）
     fixed = (collect_mask | ground_mask).astype(np.bool_)
 
+    # デバッグ情報
+    total_cells = nz * ny * nx
+    fixed_cells = fixed.sum()
+    free_cells = total_cells - fixed_cells
+    print(f"  Total cells: {total_cells}")
+    print(f"  Fixed cells (electrodes): {fixed_cells} ({fixed_cells/total_cells*100:.2f}%)")
+    print(f"  Free cells (to solve): {free_cells} ({free_cells/total_cells*100:.2f}%)")
+
+    # Z層ごとの固定セル数（nz <= 20 の場合のみ表示）
+    if nz <= 20:
+        print(f"  Fixed cells by z-layer:")
+        for k in range(nz):
+            fixed_layer = fixed[k, :, :].sum()
+            print(f"    z[{k}] = {Z[k]*1e6:6.2f} μm: {fixed_layer:6d} fixed")
+
     # SOR反復
     if NUMBA_AVAILABLE:
         # Numba高速版
@@ -412,6 +433,17 @@ def solve_weighting_potential(
             print(f"  ⚠ WARNING: Did not converge after {max_iter} iterations")
 
     print(f"  φ_w range: [{phi_w.min():.6f}, {phi_w.max():.6f}]")
+
+    # φ_w の統計（nz <= 20 の場合のみz層ごとに表示）
+    if nz <= 20:
+        print(f"  φ_w statistics by z-layer:")
+        for k in range(nz):
+            phi_layer = phi_w[k, :, :]
+            n_zero = np.sum(phi_layer == 0.0)
+            n_one = np.sum(phi_layer == 1.0)
+            n_mid = np.sum((phi_layer > 0.0) & (phi_layer < 1.0))
+            phi_mid_mean = phi_layer[(phi_layer > 0.0) & (phi_layer < 1.0)].mean() if n_mid > 0 else 0.0
+            print(f"    z[{k}] = {Z[k]*1e6:6.2f} μm: 0.0={n_zero:5d}, 1.0={n_one:5d}, mid={n_mid:5d} (mean={phi_mid_mean:.4f})")
 
     return phi_w
 
