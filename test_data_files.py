@@ -153,7 +153,7 @@ def check_srim_file(srim_file):
         # 総エネルギー
         depth_m = depth_angstrom * 1e-10
         ionization_per_m = ionization * 1e10
-        total_energy = np.trapz(ionization_per_m, depth_m)
+        total_energy = np.trapezoid(ionization_per_m, depth_m)
         print(f"\n  Total ionization energy:")
         print(f"    {total_energy/1e6:.3f} MeV")
 

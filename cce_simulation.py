@@ -205,7 +205,7 @@ class SRIMDataLoader:
         self.ionization_eV_per_m = self.ionization_eV_per_angstrom * 1e10
 
         # 総エネルギーとブラッグピーク
-        self.total_energy = np.trapz(self.ionization_eV_per_m, self.depth_m)
+        self.total_energy = np.trapezoid(self.ionization_eV_per_m, self.depth_m)
         self.bragg_peak_depth = self.depth_m[np.argmax(self.ionization_eV_per_m)]
 
         print(f"  Depth range: [0, {self.depth_m[-1]*1e6:.2f}] μm")
@@ -239,27 +239,33 @@ class SRIMDataLoader:
     def generate_eh_pairs(self, n_alpha: int = 1,
                          incident_x: Optional[float] = None,
                          incident_y: Optional[float] = None,
-                         field_interp: Optional[FieldInterpolator] = None) -> np.ndarray:
+                         incident_z: Optional[float] = None,
+                         field_interp: Optional[FieldInterpolator] = None,
+                         sampling_ratio: float = 1.0) -> Tuple[np.ndarray, int]:
         """
         電子正孔対の初期位置を生成
+
+        α線はz_max（検出器上面）から-z方向（深さ方向）に進む
 
         Parameters:
         -----------
         n_alpha : int
             α線の入射数
-        incident_x, incident_y : float, optional
-            入射位置 [m]。Noneの場合はランダム
+        incident_x, incident_y, incident_z : float, optional
+            入射位置 [m]。Noneの場合はランダムまたは自動設定
         field_interp : FieldInterpolator, optional
             入射位置の範囲決定に使用
+        sampling_ratio : float
+            サブサンプリング比率（0.0-1.0）。1.0=全キャリア、0.01=1%をサンプリング
 
         Returns:
         --------
         positions : ndarray
-            電子正孔対の初期位置 (N_pairs, 3) [m]
+            電子正孔対の初期位置 (N_sampled, 3) [m]
             各行は [x, y, z]
+        total_pairs : int
+            実際の総電子正孔対数（サンプリング前）
         """
-        positions = []
-
         # 各深さでの電子正孔対数を計算
         depth_step = np.diff(self.depth_m)
         depth_step = np.append(depth_step, depth_step[-1])
@@ -271,7 +277,14 @@ class SRIMDataLoader:
         pairs_per_depth = (energy_per_depth / E_PAIR).astype(int)
 
         total_pairs = np.sum(pairs_per_depth)
-        print(f"\nGenerating {total_pairs} e-h pairs for {n_alpha} alpha(s)")
+        n_sampled = int(total_pairs * sampling_ratio)
+
+        print(f"\nGenerating e-h pairs:")
+        print(f"  Total pairs: {total_pairs:,}")
+        print(f"  Sampling ratio: {sampling_ratio*100:.1f}%")
+        print(f"  Sampled pairs: {n_sampled:,}")
+
+        positions = []
 
         for alpha_idx in range(n_alpha):
             # 入射位置の決定
@@ -287,27 +300,46 @@ class SRIMDataLoader:
             else:
                 x0, y0 = incident_x, incident_y
 
-            # 各深さで電子正孔対を生成
+            # z入射位置（デフォルトは電界範囲の最大値 = 検出器上面）
+            if incident_z is None and field_interp is not None:
+                z0 = field_interp.z_max  # 上面から入射
+            elif incident_z is not None:
+                z0 = incident_z
+            else:
+                z0 = 0.0
+
+            # 各深さで電子正孔対を生成（サブサンプリング）
             for i, n_pairs in enumerate(pairs_per_depth):
                 if n_pairs == 0:
                     continue
 
-                z = self.depth_m[i]
+                # サンプリング数
+                n_sample = int(n_pairs * sampling_ratio)
+                if n_sample == 0 and n_pairs > 0 and np.random.rand() < sampling_ratio:
+                    n_sample = 1  # 最低1個は生成
+
+                if n_sample == 0:
+                    continue
+
+                # α線の飛程（SRIMの深さ）
+                depth = self.depth_m[i]
+
+                # 実際のz座標：z0から-z方向に進む
+                z = z0 - depth
 
                 # 小さなランダムオフセットを追加（横方向の広がり）
-                # α線トラックの直径は数nm程度と仮定
-                for _ in range(n_pairs):
+                for _ in range(n_sample):
                     dx = np.random.normal(0, 10e-9)  # 10 nm std
                     dy = np.random.normal(0, 10e-9)  # 10 nm std
                     positions.append([x0 + dx, y0 + dy, z])
 
         positions = np.array(positions)
-        print(f"  Generated {len(positions)} e-h pairs")
-        print(f"  Position range: x=[{positions[:,0].min()*1e6:.3f}, {positions[:,0].max()*1e6:.3f}] μm")
-        print(f"                  y=[{positions[:,1].min()*1e6:.3f}, {positions[:,1].max()*1e6:.3f}] μm")
-        print(f"                  z=[{positions[:,2].min()*1e6:.3f}, {positions[:,2].max()*1e6:.3f}] μm")
+        if len(positions) > 0:
+            print(f"  Position range: x=[{positions[:,0].min()*1e6:.3f}, {positions[:,0].max()*1e6:.3f}] μm")
+            print(f"                  y=[{positions[:,1].min()*1e6:.3f}, {positions[:,1].max()*1e6:.3f}] μm")
+            print(f"                  z=[{positions[:,2].min()*1e6:.3f}, {positions[:,2].max()*1e6:.3f}] μm")
 
-        return positions
+        return positions, total_pairs
 
 
 class CarrierTracker:
@@ -499,16 +531,20 @@ class CCESimulator:
     def simulate_single_alpha(self,
                              incident_x: Optional[float] = None,
                              incident_y: Optional[float] = None,
-                             n_sample_trajectories: int = 5) -> Dict:
+                             incident_z: Optional[float] = None,
+                             n_sample_trajectories: int = 5,
+                             sampling_ratio: float = 0.001) -> Dict:
         """
         単一α線イベントのシミュレーション
 
         Parameters:
         -----------
-        incident_x, incident_y : float, optional
+        incident_x, incident_y, incident_z : float, optional
             入射位置 [m]
         n_sample_trajectories : int
             軌道を保存するキャリア数
+        sampling_ratio : float
+            キャリアサンプリング比率（デフォルト0.1% = 0.001）
 
         Returns:
         --------
@@ -520,14 +556,16 @@ class CCESimulator:
         print("="*60)
 
         # 電子正孔対の生成
-        positions = self.srim.generate_eh_pairs(
+        positions, total_pairs = self.srim.generate_eh_pairs(
             n_alpha=1,
             incident_x=incident_x,
             incident_y=incident_y,
-            field_interp=self.field
+            incident_z=incident_z,
+            field_interp=self.field,
+            sampling_ratio=sampling_ratio
         )
 
-        n_total = len(positions)
+        n_sampled = len(positions)
 
         # カウンター
         n_electron_collected = 0
@@ -539,10 +577,9 @@ class CCESimulator:
         electron_trajectories = []
         hole_trajectories = []
 
-        print(f"\nTracking {n_total} carriers...")
+        print(f"\nTracking carriers...")
 
         # 電子の追跡
-        print("  Tracking electrons...")
         for i, pos in enumerate(positions):
             save_traj = (i < n_sample_trajectories)
             collected, trajectory = self.tracker.track_carrier(
@@ -558,12 +595,7 @@ class CCESimulator:
             else:
                 n_electron_lost += 1
 
-            # 進捗表示
-            if (i + 1) % 10000 == 0:
-                print(f"    {i+1}/{n_total} electrons processed")
-
         # 正孔の追跡
-        print("  Tracking holes...")
         for i, pos in enumerate(positions):
             save_traj = (i < n_sample_trajectories)
             collected, trajectory = self.tracker.track_carrier(
@@ -579,43 +611,48 @@ class CCESimulator:
             else:
                 n_hole_lost += 1
 
-            # 進捗表示
-            if (i + 1) % 10000 == 0:
-                print(f"    {i+1}/{n_total} holes processed")
+        # 実際の数に補正（サンプリング比率で割る）
+        n_electron_collected_actual = int(n_electron_collected / sampling_ratio)
+        n_hole_collected_actual = int(n_hole_collected / sampling_ratio)
+        n_electron_lost_actual = int(n_electron_lost / sampling_ratio)
+        n_hole_lost_actual = int(n_hole_lost / sampling_ratio)
 
-        # 収集電荷の計算
-        q_collected = (n_electron_collected + n_hole_collected) * Q_E
-        q_total = n_total * 2 * Q_E
-        cce = (n_electron_collected + n_hole_collected) / (2 * n_total)
+        # 収集電荷の計算（実際の数で）
+        q_collected = (n_electron_collected_actual + n_hole_collected_actual) * Q_E
+        q_total = total_pairs * 2 * Q_E
+        cce = (n_electron_collected_actual + n_hole_collected_actual) / (2 * total_pairs) if total_pairs > 0 else 0
 
         # 結果の表示
         print("\n" + "-"*60)
         print("Results:")
         print("-"*60)
-        print(f"Total e-h pairs generated: {n_total}")
-        print(f"Electrons collected: {n_electron_collected} ({n_electron_collected/n_total*100:.1f}%)")
-        print(f"Electrons lost: {n_electron_lost} ({n_electron_lost/n_total*100:.1f}%)")
-        print(f"Holes collected: {n_hole_collected} ({n_hole_collected/n_total*100:.1f}%)")
-        print(f"Holes lost: {n_hole_lost} ({n_hole_lost/n_total*100:.1f}%)")
-        print(f"Total charge collected: {q_collected*1e15:.3f} fC")
-        print(f"CCE: {cce*100:.2f}%")
+        print(f"Total e-h pairs: {total_pairs:,}")
+        print(f"Sampled pairs: {n_sampled:,} ({sampling_ratio*100:.2f}%)")
+        print(f"\nEstimated from sampling:")
+        print(f"  Electrons collected: {n_electron_collected_actual:,} ({n_electron_collected_actual/total_pairs*100:.1f}%)")
+        print(f"  Holes collected: {n_hole_collected_actual:,} ({n_hole_collected_actual/total_pairs*100:.1f}%)")
+        print(f"  Total charge: {q_collected*1e15:.2f} fC")
+        print(f"  CCE: {cce*100:.2f}%")
         print("-"*60)
 
         return {
-            'n_total': n_total,
-            'n_electron_collected': n_electron_collected,
-            'n_hole_collected': n_hole_collected,
-            'n_electron_lost': n_electron_lost,
-            'n_hole_lost': n_hole_lost,
+            'n_total': total_pairs,
+            'n_sampled': n_sampled,
+            'n_electron_collected': n_electron_collected_actual,
+            'n_hole_collected': n_hole_collected_actual,
+            'n_electron_lost': n_electron_lost_actual,
+            'n_hole_lost': n_hole_lost_actual,
             'q_collected': q_collected,
             'q_total': q_total,
             'cce': cce,
             'electron_trajectories': electron_trajectories,
             'hole_trajectories': hole_trajectories,
-            'initial_positions': positions
+            'initial_positions': positions,
+            'sampling_ratio': sampling_ratio
         }
 
-    def simulate_multiple_alphas(self, n_events: int = 100) -> List[Dict]:
+    def simulate_multiple_alphas(self, n_events: int = 100,
+                                 sampling_ratio: float = 0.001) -> List[Dict]:
         """
         複数α線イベントのシミュレーション
 
@@ -623,6 +660,8 @@ class CCESimulator:
         -----------
         n_events : int
             イベント数
+        sampling_ratio : float
+            キャリアサンプリング比率
 
         Returns:
         --------
@@ -630,14 +669,17 @@ class CCESimulator:
             各イベントの結果
         """
         print("\n" + "="*60)
-        print(f"Multiple alpha events simulation ({n_events} events)")
+        print(f"Multiple events simulation ({n_events} events)")
         print("="*60)
 
         results = []
 
         for i in range(n_events):
-            print(f"\nEvent {i+1}/{n_events}")
-            result = self.simulate_single_alpha(n_sample_trajectories=0)
+            print(f"\n--- Event {i+1}/{n_events} ---")
+            result = self.simulate_single_alpha(
+                n_sample_trajectories=0,
+                sampling_ratio=sampling_ratio
+            )
             results.append(result)
 
         # 統計情報
@@ -645,10 +687,10 @@ class CCESimulator:
         q_values = [r['q_collected'] for r in results]
 
         print("\n" + "="*60)
-        print(f"Statistics over {n_events} events:")
+        print(f"Statistics ({n_events} events):")
         print("="*60)
-        print(f"CCE: mean = {np.mean(cce_values)*100:.2f}%, std = {np.std(cce_values)*100:.2f}%")
-        print(f"Collected charge: mean = {np.mean(q_values)*1e15:.3f} fC, std = {np.std(q_values)*1e15:.3f} fC")
+        print(f"CCE: {np.mean(cce_values)*100:.2f}% ± {np.std(cce_values)*100:.2f}%")
+        print(f"Charge: {np.mean(q_values)*1e15:.2f} ± {np.std(q_values)*1e15:.2f} fC")
         print("="*60)
 
         return results
@@ -849,29 +891,48 @@ class Visualizer:
 def main():
     """メイン関数"""
 
-    # ファイルパス設定
-    # ユーザーはこれらのパスを実際のファイル位置に合わせて変更してください
+    # ==================== パラメータ設定 ====================
+
+    # ファイルパス設定（必要に応じて変更してください）
+    # Linux/Mac の場合
     field_file = '電界/yokogata_field.npz'
     srim_file = 'data/5486keVαinSiCIONIZ.txt'
     exp_file = 'data/SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
 
+    # Windows の場合は以下のようにフルパスで指定することも可能
+    # field_file = r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz'
+    # srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
+    # exp_file = r'C:\Users\discu\デスクトップ\python\cce\data\SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
+
+    # シミュレーションパラメータ
+    sampling_ratio = 0.001  # 0.1% をサンプリング（メモリ節約）
+                            # 1.0 = 全キャリア、0.01 = 1%、0.001 = 0.1%
+    n_events = 10           # イベント数
+
+    # ==================== ファイルチェック ====================
+
     # ファイルの存在チェック
     if not os.path.exists(field_file):
         print(f"ERROR: Field file not found: {field_file}")
-        print("Please run build_and_validate_fields.py first to generate the field data.")
-        print("Or update the field_file path in main().")
+        print("\nPlease either:")
+        print("  1. Run generate_test_field.py to create test data")
+        print("  2. Run build_and_validate_fields.py with real OpenSTF data")
+        print("  3. Update the field_file path in main()")
         return
 
     if not os.path.exists(srim_file):
         print(f"ERROR: SRIM file not found: {srim_file}")
-        print("Please place the SRIM ionization file at: {srim_file}")
+        print("\nPlease place the SRIM ionization file at: {srim_file}")
         print("Or update the srim_file path in main().")
         return
 
-    # シミュレーターの初期化
+    # ==================== シミュレーション開始 ====================
+
     print("\n" + "="*70)
     print("SiC Detector CCE Simulation")
     print("="*70)
+    print(f"Sampling ratio: {sampling_ratio*100:.2f}%")
+    print(f"Number of events: {n_events}")
 
     simulator = CCESimulator(field_file, srim_file)
 
@@ -880,7 +941,10 @@ def main():
     print("STEP 1: Single event test with trajectory visualization")
     print("="*70)
 
-    result_single = simulator.simulate_single_alpha(n_sample_trajectories=5)
+    result_single = simulator.simulate_single_alpha(
+        n_sample_trajectories=5,
+        sampling_ratio=sampling_ratio
+    )
 
     # 軌道の可視化
     Visualizer.plot_trajectories(result_single, 'trajectory_plot.png')
@@ -890,8 +954,10 @@ def main():
     print("STEP 2: Multiple events simulation")
     print("="*70)
 
-    n_events = 10  # まずは10イベントでテスト、後で100に増やす
-    results_multiple = simulator.simulate_multiple_alphas(n_events=n_events)
+    results_multiple = simulator.simulate_multiple_alphas(
+        n_events=n_events,
+        sampling_ratio=sampling_ratio
+    )
 
     # ヒストグラムの作成
     Visualizer.plot_charge_histogram(results_multiple, output_file='charge_histogram.png')
