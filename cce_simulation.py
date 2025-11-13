@@ -916,154 +916,188 @@ class Visualizer:
 
 
 def main():
-    """メイン関数"""
+    """メイン関数（横型とくし形を両方処理）"""
 
-    # ==================== パラメータ設定 ====================
+    # ==================== 共通パラメータ ====================
 
-    # ファイルパス設定（必要に応じて変更してください）
-    # Linux/Mac の場合
-    field_file = '電界/yokogata_field.npz'
+    # SRIMファイル（共通）
     srim_file = 'data/5486keVαinSiCIONIZ.txt'
-    exp_file = 'data/SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
-
-    # Windows の場合は以下のようにフルパスで指定（コメント外して使用）
-    # field_file = r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz'
     # srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
-    # 横型検出器の場合：
-    # exp_file = r'C:\Users\discu\デスクトップ\python\cce\実験データ\SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
-    # くし形検出器の場合：
-    # exp_file = r'C:\Users\discu\デスクトップ\python\cce\実験データ\くし形100V_204222.csv'
 
     # シミュレーションパラメータ
-    sampling_ratio = 0.001  # 0.1% をサンプリング（メモリ節約）
-                            # 1.0 = 全キャリア、0.01 = 1%、0.001 = 0.1%
+    sampling_ratio = 0.001  # 0.1% サンプリング
     n_events = 10           # イベント数
 
-    # ==================== ファイルチェック ====================
+    # ==================== 検出器構成リスト ====================
 
-    # ファイルの存在チェック
-    if not os.path.exists(field_file):
-        print(f"ERROR: Field file not found: {field_file}")
-        print("\nPlease either:")
-        print("  1. Run generate_test_field.py to create test data")
-        print("  2. Run build_and_validate_fields.py with real OpenSTF data")
-        print("  3. Update the field_file path in main()")
-        return
+    # 処理する検出器のリスト（両方を自動処理）
+    detector_configs = [
+        {
+            'name': '横型',
+            'field_file': '電界/yokogata_field.npz',
+            'exp_file': 'data/SiC2_500_10_clear_α_20250124_142116_100.0V.csv',
+            'output_prefix': 'yokogata_',
+            # Windows パス（必要に応じてコメント外す）
+            # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz',
+            # 'exp_file': r'C:\Users\discu\デスクトップ\python\cce\実験データ\SiC2_500_10_clear_α_20250124_142116_100.0V.csv',
+        },
+        {
+            'name': 'くし形',
+            'field_file': '電界/kushigata_field.npz',
+            'exp_file': 'data/くし形100V_204222.csv',
+            'output_prefix': 'kushigata_',
+            # Windows パス（必要に応じてコメント外す）
+            # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\kushigata_field.npz',
+            # 'exp_file': r'C:\Users\discu\デスクトップ\python\cce\実験データ\くし形100V_204222.csv',
+        }
+    ]
 
-    if not os.path.exists(srim_file):
-        print(f"ERROR: SRIM file not found: {srim_file}")
-        print("\nPlease place the SRIM ionization file at: {srim_file}")
-        print("Or update the srim_file path in main().")
-        return
+    # ==================== 各検出器でシミュレーション ====================
 
-    # ==================== シミュレーション開始 ====================
-
-    print("\n" + "="*70)
-    print("SiC Detector CCE Simulation")
-    print("="*70)
+    print("\n" + "="*80)
+    print("SiC Detector CCE Simulation (Multi-Detector Mode)")
+    print("="*80)
     print(f"Sampling ratio: {sampling_ratio*100:.2f}%")
-    print(f"Number of events: {n_events}")
+    print(f"Events per detector: {n_events}")
+    print(f"Detectors: {', '.join([c['name'] for c in detector_configs])}")
 
-    simulator = CCESimulator(field_file, srim_file)
+    # SRIMファイルチェック
+    if not os.path.exists(srim_file):
+        print(f"\nERROR: SRIM file not found: {srim_file}")
+        print("Please update the srim_file path in main().")
+        return
 
-    # === ステップ1: 単一イベントのテスト ===
-    print("\n" + "="*70)
-    print("STEP 1: Single event test with trajectory visualization")
-    print("="*70)
+    # 各検出器を順番に処理
+    for config in detector_configs:
+        name = config['name']
+        field_file = config['field_file']
+        exp_file = config['exp_file']
+        prefix = config['output_prefix']
 
-    result_single = simulator.simulate_single_alpha(
-        n_sample_trajectories=5,
-        sampling_ratio=sampling_ratio
-    )
+        print("\n\n" + "="*80)
+        print(f"Processing: {name} detector")
+        print("="*80)
 
-    # 軌道の可視化
-    Visualizer.plot_trajectories(result_single, 'trajectory_plot.png')
+        # ファイル存在チェック
+        if not os.path.exists(field_file):
+            print(f"⚠ WARNING: Field file not found: {field_file}")
+            print(f"Skipping {name} detector...")
+            continue
 
-    # === ステップ2: 複数イベントのシミュレーション ===
-    print("\n" + "="*70)
-    print("STEP 2: Multiple events simulation")
-    print("="*70)
+        # シミュレーター初期化
+        try:
+            simulator = CCESimulator(field_file, srim_file)
+        except Exception as e:
+            print(f"❌ ERROR initializing simulator: {e}")
+            print(f"Skipping {name} detector...")
+            continue
 
-    results_multiple = simulator.simulate_multiple_alphas(
-        n_events=n_events,
-        sampling_ratio=sampling_ratio
-    )
+        # ステップ1: 単一イベント（軌道可視化）
+        print(f"\n{'─'*70}")
+        print(f"STEP 1: Single event test ({name})")
+        print('─'*70)
 
-    # ヒストグラムの作成
-    Visualizer.plot_charge_histogram(results_multiple, output_file='charge_histogram.png')
-
-    # === ステップ3: 実験データとの比較 ===
-    if os.path.exists(exp_file):
-        print("\n" + "="*70)
-        print("STEP 3: Comparison with experimental data")
-        print("="*70)
-
-        # ファイルフォーマットの自動判定
-        # くし形: 22行ヘッダー + ヒストグラムデータ（ビンセンタ、カウント数）
-        # 横型: タブ区切りのイベントデータ（WaveformIndex, ..., PeakHeight）
-
-        # まず最初の数行を読んで判定
-        with open(exp_file, 'r', encoding='utf-8', errors='ignore') as f:
-            first_lines = [f.readline() for _ in range(25)]
-
-        # くし形の判定: 22行以上のヘッダーがあり、数値データが続く
-        is_kushigata = False
-        if len(first_lines) > 22:
-            # 23行目（index=22）が数値データかチェック
-            try:
-                parts = first_lines[22].split()
-                if len(parts) >= 2:
-                    float(parts[0])
-                    float(parts[1])
-                    is_kushigata = True
-            except:
-                pass
-
-        if is_kushigata:
-            # くし形: ヒストグラムデータ
-            print("Detected Kushigata format (histogram data)")
-            exp_data = pd.read_csv(
-                exp_file,
-                skiprows=22,
-                sep=r'\s+',  # 空白区切り
-                header=None,
-                names=['BinCenter', 'Counts']
-            )
-            print(f"Loaded histogram data: {len(exp_data)} bins")
-        else:
-            # 横型: イベントデータ（タブまたはカンマ区切り）
-            print("Detected Yokogata format (event data)")
-            try:
-                exp_data = pd.read_csv(exp_file, sep='\t')
-                if len(exp_data.columns) == 1:
-                    exp_data = pd.read_csv(exp_file, sep=',')
-            except:
-                exp_data = pd.read_csv(exp_file, sep=',')
-            print(f"Loaded experimental data: {len(exp_data)} events")
-
-        print(f"Columns: {list(exp_data.columns)}")
-
-        Visualizer.plot_experiment_comparison(
-            results_multiple, exp_data,
-            output_file='experiment_comparison.png'
+        result_single = simulator.simulate_single_alpha(
+            n_sample_trajectories=5,
+            sampling_ratio=sampling_ratio
         )
-    else:
-        print(f"\nWARNING: Experimental data file not found: {exp_file}")
-        print("Skipping experimental comparison.")
 
-    # 統計情報の保存
-    Visualizer.save_statistics(results_multiple, 'cce_statistics.txt')
+        Visualizer.plot_trajectories(result_single, f'{prefix}trajectory_plot.png')
 
+        # ステップ2: 複数イベント
+        print(f"\n{'─'*70}")
+        print(f"STEP 2: Multiple events ({name})")
+        print('─'*70)
+
+        results_multiple = simulator.simulate_multiple_alphas(
+            n_events=n_events,
+            sampling_ratio=sampling_ratio
+        )
+
+        Visualizer.plot_charge_histogram(results_multiple,
+                                        output_file=f'{prefix}charge_histogram.png')
+
+        # === ステップ3: 実験データとの比較 ===
+        exp_file = config['exp_file']
+        if os.path.exists(exp_file):
+            print(f"\n{'─'*70}")
+            print(f"STEP 3: Experimental comparison ({name})")
+            print('─'*70)
+
+            # ファイルフォーマットの自動判定
+            # くし形: 22行ヘッダー + ヒストグラムデータ（ビンセンタ、カウント数）
+            # 横型: タブ区切りのイベントデータ（WaveformIndex, ..., PeakHeight）
+
+            # まず最初の数行を読んで判定
+            with open(exp_file, 'r', encoding='utf-8', errors='ignore') as f:
+                first_lines = [f.readline() for _ in range(25)]
+
+            # くし形の判定: 22行以上のヘッダーがあり、数値データが続く
+            is_kushigata = False
+            if len(first_lines) > 22:
+                # 23行目（index=22）が数値データかチェック
+                try:
+                    parts = first_lines[22].split()
+                    if len(parts) >= 2:
+                        float(parts[0])
+                        float(parts[1])
+                        is_kushigata = True
+                except:
+                    pass
+
+            if is_kushigata:
+                # くし形: ヒストグラムデータ
+                print("Detected Kushigata format (histogram data)")
+                exp_data = pd.read_csv(
+                    exp_file,
+                    skiprows=22,
+                    sep=r'\s+',  # 空白区切り
+                    header=None,
+                    names=['BinCenter', 'Counts']
+                )
+                print(f"Loaded histogram data: {len(exp_data)} bins")
+            else:
+                # 横型: イベントデータ（タブまたはカンマ区切り）
+                print("Detected Yokogata format (event data)")
+                try:
+                    exp_data = pd.read_csv(exp_file, sep='\t')
+                    if len(exp_data.columns) == 1:
+                        exp_data = pd.read_csv(exp_file, sep=',')
+                except:
+                    exp_data = pd.read_csv(exp_file, sep=',')
+                print(f"Loaded experimental data: {len(exp_data)} events")
+
+            print(f"Columns: {list(exp_data.columns)}")
+
+            Visualizer.plot_experiment_comparison(
+                results_multiple, exp_data,
+                output_file=f'{prefix}experiment_comparison.png'
+            )
+        else:
+            print(f"\nWARNING: Experimental data file not found: {exp_file}")
+            print("Skipping experimental comparison.")
+
+        # 統計情報の保存
+        Visualizer.save_statistics(results_multiple,
+                                  output_file=f'{prefix}cce_statistics.txt')
+
+        print(f"\n{'─'*70}")
+        print(f"{name} simulation completed!")
+        print('─'*70)
+        print(f"\nGenerated files for {name}:")
+        print(f"  - {prefix}trajectory_plot.png")
+        print(f"  - {prefix}charge_histogram.png")
+        if os.path.exists(exp_file):
+            print(f"  - {prefix}experiment_comparison.png")
+        print(f"  - {prefix}cce_statistics.txt")
+        print()
+
+    # === 全体の完了メッセージ ===
     print("\n" + "="*70)
-    print("Simulation completed successfully!")
+    print("All simulations completed successfully!")
     print("="*70)
-    print("\nGenerated files:")
-    print("  - trajectory_plot.png")
-    print("  - charge_histogram.png")
-    if os.path.exists(exp_file):
-        print("  - experiment_comparison.png")
-    print("  - cce_statistics.txt")
-    print("\n")
+    print("\n✅ 横型とくし形の両方のシミュレーションが完了しました")
+    print()
 
 
 if __name__ == '__main__':
