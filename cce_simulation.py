@@ -899,10 +899,13 @@ def main():
     srim_file = 'data/5486keVαinSiCIONIZ.txt'
     exp_file = 'data/SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
 
-    # Windows の場合は以下のようにフルパスで指定することも可能
+    # Windows の場合は以下のようにフルパスで指定（コメント外して使用）
     # field_file = r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz'
     # srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
-    # exp_file = r'C:\Users\discu\デスクトップ\python\cce\data\SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
+    # 横型検出器の場合：
+    # exp_file = r'C:\Users\discu\デスクトップ\python\cce\実験データ\SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
+    # くし形検出器の場合：
+    # exp_file = r'C:\Users\discu\デスクトップ\python\cce\実験データ\くし形100V_204222.csv'
 
     # シミュレーションパラメータ
     sampling_ratio = 0.001  # 0.1% をサンプリング（メモリ節約）
