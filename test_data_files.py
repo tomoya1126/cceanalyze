@@ -10,6 +10,12 @@ import sys
 import numpy as np
 import pandas as pd
 
+# NumPy互換性: trapezoidがない場合はtrapzを使用
+if hasattr(np, 'trapezoid'):
+    trapz_integrate = np.trapezoid
+else:
+    trapz_integrate = np.trapz
+
 
 def check_field_file(field_file):
     """電界ファイルのチェック"""
@@ -153,7 +159,7 @@ def check_srim_file(srim_file):
         # 総エネルギー
         depth_m = depth_angstrom * 1e-10
         ionization_per_m = ionization * 1e10
-        total_energy = np.trapezoid(ionization_per_m, depth_m)
+        total_energy = trapz_integrate(ionization_per_m, depth_m)
         print(f"\n  Total ionization energy:")
         print(f"    {total_energy/1e6:.3f} MeV")
 

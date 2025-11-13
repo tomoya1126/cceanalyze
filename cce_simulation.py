@@ -15,6 +15,12 @@ import pandas as pd
 from typing import Tuple, Optional, List, Dict
 import warnings
 
+# NumPy互換性: trapezoidがない場合はtrapzを使用
+if hasattr(np, 'trapezoid'):
+    trapz_integrate = np.trapezoid
+else:
+    trapz_integrate = np.trapz
+
 
 # ========== 物理定数 ==========
 E_PAIR = 7.8  # eV - 電子正孔対生成エネルギー
@@ -205,7 +211,7 @@ class SRIMDataLoader:
         self.ionization_eV_per_m = self.ionization_eV_per_angstrom * 1e10
 
         # 総エネルギーとブラッグピーク
-        self.total_energy = np.trapezoid(self.ionization_eV_per_m, self.depth_m)
+        self.total_energy = trapz_integrate(self.ionization_eV_per_m, self.depth_m)
         self.bragg_peak_depth = self.depth_m[np.argmax(self.ionization_eV_per_m)]
 
         print(f"  Depth range: [0, {self.depth_m[-1]*1e6:.2f}] μm")
