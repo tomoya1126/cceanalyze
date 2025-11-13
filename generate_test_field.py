@@ -162,8 +162,8 @@ def main():
         nz=100
     )
 
-    # 保存
-    output_file = os.path.join(out_dir, 'yokogata_field.npz')
+    # 保存（テスト用なので別名で保存）
+    output_file = os.path.join(out_dir, 'TEST_dummy_field.npz')
     np.savez_compressed(
         output_file,
         X=X, Y=Y, Z=Z,
