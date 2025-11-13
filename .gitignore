@@ -1,10 +1,23 @@
 # Pythonが自動生成するファイル
 __pycache__/
+*.pyc
+*.pyo
 
 # NumPyのデータファイル
 *.npz
 
-# シミュレーションの結果テキストデータ
-*.txt
-*.png
+# シミュレーション結果ファイル
+trajectory_plot.png
+charge_histogram.png
+experiment_comparison.png
+cce_statistics.txt
+
+# ログファイル
 *.log
+
+# 電界データ（生成されるもの）
+電界/*.npz
+
+# ただし、サンプルデータは保持
+!data/*.txt
+!data/*.csv
