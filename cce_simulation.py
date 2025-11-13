@@ -927,8 +927,10 @@ def main():
     # ==================== 共通パラメータ ====================
 
     # SRIMファイル（共通）
-    srim_file = 'data/5486keVαinSiCIONIZ.txt'
-    # srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
+    # Windows: 実際の環境のパス
+    srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
+    # Linux/Mac: 相対パスを使う場合はこちらをコメント解除
+    # srim_file = 'data/5486keVαinSiCIONIZ.txt'
 
     # シミュレーションパラメータ
     sampling_ratio = 0.001  # 0.1% サンプリング

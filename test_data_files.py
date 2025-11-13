@@ -280,7 +280,10 @@ def main():
         ('横型', '電界/yokogata_field.npz'),
         ('くし形', '電界/kushigata_field.npz')
     ]
-    srim_file = 'data/5486keVαinSiCIONIZ.txt'
+    # Windows: 実際の環境のパス
+    srim_file = r'C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt'
+    # Linux/Mac: 相対パスを使う場合はこちらをコメント解除
+    # srim_file = 'data/5486keVαinSiCIONIZ.txt'
 
     # チェック実行
     results = {}
