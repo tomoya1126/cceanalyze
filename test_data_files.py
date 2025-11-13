@@ -281,10 +281,6 @@ def main():
         ('くし形', '電界/kushigata_field.npz')
     ]
     srim_file = 'data/5486keVαinSiCIONIZ.txt'
-    exp_files = [
-        ('横型', '実験データ/SiC2_500_10_clear_α_20250124_142116_100.0V.csv'),
-        ('くし形', '実験データ/くし形100V_204222.csv')
-    ]
 
     # チェック実行
     results = {}
@@ -299,13 +295,6 @@ def main():
     # SRIM
     results['srim'] = check_srim_file(srim_file)
 
-    # 実験データ
-    for name, exp_file in exp_files:
-        print(f"\n{'='*60}")
-        print(f"Experimental data for {name}")
-        print('='*60)
-        results[f'exp_{name}'] = check_exp_file(exp_file)
-
     # 結果サマリー
     print("\n" + "="*60)
     print("SUMMARY")
@@ -318,11 +307,6 @@ def main():
 
     print(f"\nSRIM data:")
     print(f"  {status_icon(results['srim'])} {srim_file}")
-
-    print(f"\nExperimental data:")
-    for name, exp_file in exp_files:
-        status = results[f'exp_{name}']
-        print(f"  {status_icon(status) if status else '⚠'} {name}: {exp_file}")
 
     # 必須ファイル（電界とSRIM）がOKかチェック
     field_ok = any(results[f'field_{name}'] for name, _ in field_files)

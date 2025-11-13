@@ -941,20 +941,16 @@ def main():
         {
             'name': '横型',
             'field_file': '電界/yokogata_field.npz',
-            'exp_file': '実験データ/SiC2_500_10_clear_α_20250124_142116_100.0V.csv',
             'output_prefix': 'yokogata_',
             # Windows パス（必要に応じてコメント外す）
             # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz',
-            # 'exp_file': r'C:\Users\discu\デスクトップ\python\cce\実験データ\SiC2_500_10_clear_α_20250124_142116_100.0V.csv',
         },
         {
             'name': 'くし形',
             'field_file': '電界/kushigata_field.npz',
-            'exp_file': '実験データ/くし形100V_204222.csv',
             'output_prefix': 'kushigata_',
             # Windows パス（必要に応じてコメント外す）
             # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\kushigata_field.npz',
-            # 'exp_file': r'C:\Users\discu\デスクトップ\python\cce\実験データ\くし形100V_204222.csv',
         }
     ]
 
@@ -977,7 +973,6 @@ def main():
     for config in detector_configs:
         name = config['name']
         field_file = config['field_file']
-        exp_file = config['exp_file']
         prefix = config['output_prefix']
 
         print("\n\n" + "="*80)
@@ -1023,67 +1018,10 @@ def main():
         Visualizer.plot_charge_histogram(results_multiple,
                                         output_file=f'{prefix}charge_histogram.png')
 
-        # === ステップ3: 実験データとの比較 ===
-        exp_file = config['exp_file']
-        if os.path.exists(exp_file):
-            print(f"\n{'─'*70}")
-            print(f"STEP 3: Experimental comparison ({name})")
-            print('─'*70)
-
-            # ファイルフォーマットの自動判定
-            # くし形: 22行ヘッダー + ヒストグラムデータ（ビンセンタ、カウント数）
-            # 横型: タブ区切りのイベントデータ（WaveformIndex, ..., PeakHeight）
-
-            # まず最初の数行を読んで判定
-            with open(exp_file, 'r', encoding='utf-8', errors='ignore') as f:
-                first_lines = [f.readline() for _ in range(25)]
-
-            # くし形の判定: 22行以上のヘッダーがあり、数値データが続く
-            is_kushigata = False
-            if len(first_lines) > 22:
-                # 23行目（index=22）が数値データかチェック
-                try:
-                    parts = first_lines[22].split()
-                    if len(parts) >= 2:
-                        float(parts[0])
-                        float(parts[1])
-                        is_kushigata = True
-                except:
-                    pass
-
-            if is_kushigata:
-                # くし形: ヒストグラムデータ
-                print("Detected Kushigata format (histogram data)")
-                exp_data = pd.read_csv(
-                    exp_file,
-                    skiprows=22,
-                    sep=r'\s+',  # 空白区切り
-                    header=None,
-                    names=['BinCenter', 'Counts']
-                )
-                print(f"Loaded histogram data: {len(exp_data)} bins")
-            else:
-                # 横型: イベントデータ（タブまたはカンマ区切り）
-                print("Detected Yokogata format (event data)")
-                try:
-                    exp_data = pd.read_csv(exp_file, sep='\t')
-                    if len(exp_data.columns) == 1:
-                        exp_data = pd.read_csv(exp_file, sep=',')
-                except:
-                    exp_data = pd.read_csv(exp_file, sep=',')
-                print(f"Loaded experimental data: {len(exp_data)} events")
-
-            print(f"Columns: {list(exp_data.columns)}")
-
-            Visualizer.plot_experiment_comparison(
-                results_multiple, exp_data,
-                output_file=f'{prefix}experiment_comparison.png'
-            )
-        else:
-            print(f"\nWARNING: Experimental data file not found: {exp_file}")
-            print("Skipping experimental comparison.")
-
-        # 統計情報の保存
+        # === ステップ3: 統計情報の保存 ===
+        print(f"\n{'─'*70}")
+        print(f"STEP 3: Save statistics ({name})")
+        print('─'*70)
         Visualizer.save_statistics(results_multiple,
                                   output_file=f'{prefix}cce_statistics.txt')
 
@@ -1093,8 +1031,6 @@ def main():
         print(f"\nGenerated files for {name}:")
         print(f"  - {prefix}trajectory_plot.png")
         print(f"  - {prefix}charge_histogram.png")
-        if os.path.exists(exp_file):
-            print(f"  - {prefix}experiment_comparison.png")
         print(f"  - {prefix}cce_statistics.txt")
         print()
 
