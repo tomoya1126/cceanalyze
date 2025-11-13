@@ -772,22 +772,45 @@ class Visualizer:
     def plot_experiment_comparison(results: List[Dict],
                                    experimental_data: pd.DataFrame,
                                    output_file: str = 'experiment_comparison.png'):
-        """実験データとの比較"""
+        """実験データとの比較（横型とくし形の両方に対応）"""
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
         # シミュレーション結果
         q_sim = np.array([r['q_collected'] for r in results]) * 1e15  # fC
         cce_sim = np.array([r['cce'] for r in results]) * 100  # %
 
-        # 実験データ（PeakHeightをfCに変換する必要がある）
-        # ここでは仮にPeakHeightが直接電圧[V]として記録されていると仮定
-        # 実際の変換係数はプリアンプのゲインに依存
-        if 'PeakHeight' in experimental_data.columns:
-            peak_height_V = experimental_data['PeakHeight'].values
+        # プリアンプの感度（実験セットアップに応じて調整）
+        sensitivity = 1000  # V/fC
 
-            # プリアンプの感度を仮定（例: 1 V/pC = 1000 V/fC）
-            # この値は実験セットアップに応じて調整が必要
-            sensitivity = 1000  # V/fC
+        # 実験データのフォーマット判定
+        if 'BinCenter' in experimental_data.columns and 'Counts' in experimental_data.columns:
+            # ========== くし形: ヒストグラムデータ ==========
+            bin_centers = experimental_data['BinCenter'].values  # V
+            counts = experimental_data['Counts'].values
+
+            # ビンセンタから波高値分布を復元（簡易的）
+            q_exp_list = []
+            for bin_center, count in zip(bin_centers, counts):
+                q_fC = bin_center * 1000 / sensitivity  # V -> fC
+                q_exp_list.extend([q_fC] * int(count))
+            q_exp = np.array(q_exp_list)
+
+            # ヒストグラム比較（ビンを使用）
+            ax1 = axes[0, 0]
+            ax1.hist(q_sim, bins=30, alpha=0.5, color='blue', label='Simulation', density=True)
+            # 実験データはヒストグラムとしてプロット
+            ax1.bar(bin_centers * 1000 / sensitivity, counts / (counts.sum() * (bin_centers[1] - bin_centers[0]) * 1000 / sensitivity),
+                   width=(bin_centers[1] - bin_centers[0]) * 1000 / sensitivity * 0.8,
+                   alpha=0.5, color='red', label='Experiment')
+            ax1.set_xlabel('Collected Charge [fC]')
+            ax1.set_ylabel('Probability Density')
+            ax1.set_title('Charge Distribution Comparison (Kushigata)')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+
+        elif 'PeakHeight' in experimental_data.columns:
+            # ========== 横型: イベントデータ ==========
+            peak_height_V = experimental_data['PeakHeight'].values
             q_exp = peak_height_V * 1000 / sensitivity  # fC
 
             # ヒストグラム比較
@@ -796,10 +819,16 @@ class Visualizer:
             ax1.hist(q_exp, bins=30, alpha=0.5, color='red', label='Experiment', density=True)
             ax1.set_xlabel('Collected Charge [fC]')
             ax1.set_ylabel('Probability Density')
-            ax1.set_title('Charge Distribution Comparison')
+            ax1.set_title('Charge Distribution Comparison (Yokogata)')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
+        else:
+            # 不明なフォーマット
+            print("WARNING: Unknown experimental data format")
+            q_exp = np.array([])
 
+        # ========== 共通の統計プロット ==========
+        if len(q_exp) > 0:
             # 統計比較
             ax2 = axes[0, 1]
             labels = ['Simulation', 'Experiment']
@@ -818,9 +847,8 @@ class Visualizer:
             ax3 = axes[1, 0]
             q_sim_sorted = np.sort(q_sim)
             q_exp_sorted = np.sort(q_exp)
-            # 長さを合わせる
             n_min = min(len(q_sim_sorted), len(q_exp_sorted))
-            ax3.scatter(q_exp_sorted[:n_min], q_sim_sorted[:n_min], alpha=0.5)
+            ax3.scatter(q_exp_sorted[:n_min], q_sim_sorted[:n_min], alpha=0.5, s=10)
             lims = [min(q_exp_sorted.min(), q_sim_sorted.min()),
                    max(q_exp_sorted.max(), q_sim_sorted.max())]
             ax3.plot(lims, lims, 'r--', alpha=0.7, label='y=x')
@@ -830,11 +858,10 @@ class Visualizer:
             ax3.legend()
             ax3.grid(True, alpha=0.3)
 
-            # 差の分布
+            # 統計サマリー
             ax4 = axes[1, 1]
-            # 平均値の差
             diff = q_sim.mean() - q_exp.mean()
-            relative_diff = diff / q_exp.mean() * 100
+            relative_diff = diff / q_exp.mean() * 100 if q_exp.mean() != 0 else 0
             ax4.text(0.5, 0.7, f'Simulation mean: {q_sim.mean():.2f} fC',
                     ha='center', va='center', fontsize=12, transform=ax4.transAxes)
             ax4.text(0.5, 0.5, f'Experiment mean: {q_exp.mean():.2f} fC',
@@ -971,18 +998,49 @@ def main():
         print("STEP 3: Comparison with experimental data")
         print("="*70)
 
-        # タブ区切り（TSV）またはカンマ区切り（CSV）を自動判定
-        try:
-            # まずタブ区切りを試す
-            exp_data = pd.read_csv(exp_file, sep='\t')
-            if len(exp_data.columns) == 1:
-                # 1列しかない場合はカンマ区切りを試す
-                exp_data = pd.read_csv(exp_file, sep=',')
-        except:
-            # カンマ区切りで再試行
-            exp_data = pd.read_csv(exp_file, sep=',')
+        # ファイルフォーマットの自動判定
+        # くし形: 22行ヘッダー + ヒストグラムデータ（ビンセンタ、カウント数）
+        # 横型: タブ区切りのイベントデータ（WaveformIndex, ..., PeakHeight）
 
-        print(f"Loaded experimental data: {len(exp_data)} events")
+        # まず最初の数行を読んで判定
+        with open(exp_file, 'r', encoding='utf-8', errors='ignore') as f:
+            first_lines = [f.readline() for _ in range(25)]
+
+        # くし形の判定: 22行以上のヘッダーがあり、数値データが続く
+        is_kushigata = False
+        if len(first_lines) > 22:
+            # 23行目（index=22）が数値データかチェック
+            try:
+                parts = first_lines[22].split()
+                if len(parts) >= 2:
+                    float(parts[0])
+                    float(parts[1])
+                    is_kushigata = True
+            except:
+                pass
+
+        if is_kushigata:
+            # くし形: ヒストグラムデータ
+            print("Detected Kushigata format (histogram data)")
+            exp_data = pd.read_csv(
+                exp_file,
+                skiprows=22,
+                sep=r'\s+',  # 空白区切り
+                header=None,
+                names=['BinCenter', 'Counts']
+            )
+            print(f"Loaded histogram data: {len(exp_data)} bins")
+        else:
+            # 横型: イベントデータ（タブまたはカンマ区切り）
+            print("Detected Yokogata format (event data)")
+            try:
+                exp_data = pd.read_csv(exp_file, sep='\t')
+                if len(exp_data.columns) == 1:
+                    exp_data = pd.read_csv(exp_file, sep=',')
+            except:
+                exp_data = pd.read_csv(exp_file, sep=',')
+            print(f"Loaded experimental data: {len(exp_data)} events")
+
         print(f"Columns: {list(exp_data.columns)}")
 
         Visualizer.plot_experiment_comparison(
