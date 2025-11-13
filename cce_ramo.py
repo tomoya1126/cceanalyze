@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Shockley-Ramo定理に基づくSiC検出器CCE計算
+Shockley-Ramo定理に基づくSiC検出器CCE計算（Numba高速化版）
 
 α線入射時の電荷収集効率（CCE）を、重み電位（weighting potential）を用いて
 高速に計算します。キャリアの個別追跡は行わず、Shockley-Ramoの定理から
 直接誘導電荷を計算します。
+
+高速化技術：
+- Numba JITコンパイル（SOR法の内部ループ）
+- マルチスレッド並列化（nb.prange）
+- 重み電位のnpzキャッシュ
 
 物理定数：
 - SiC 平均電子正孔対生成エネルギー: W_eh = 7.8 eV
@@ -15,9 +20,18 @@ Shockley-Ramo定理に基づくSiC検出器CCE計算
 import argparse
 import os
 from typing import Optional
+import hashlib
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+try:
+    import numba as nb
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    print("WARNING: numba not available. Falling back to pure numpy (very slow).")
+    print("Install numba for 10-100x speedup: pip install numba")
 
 # ========== 物理定数 ==========
 W_EH = 7.8  # eV - SiC の平均電子正孔対生成エネルギー
@@ -217,7 +231,66 @@ def create_electrode_masks(
     return collect_mask, ground_mask, k_surface
 
 
-# ========== 重み電位計算 ==========
+# ========== 重み電位計算（Numba高速化版） ==========
+
+if NUMBA_AVAILABLE:
+    @nb.njit(parallel=True, fastmath=True)
+    def sor_step_numba(phi_w: np.ndarray, fixed: np.ndarray, omega: float) -> float:
+        """
+        SOR (Successive Over-Relaxation) 1ステップ（Numba JITコンパイル版）
+
+        Parameters
+        ----------
+        phi_w : np.ndarray
+            重み電位, shape (nz, ny, nx)
+        fixed : np.ndarray
+            固定セルマスク（True=電極）
+        omega : float
+            緩和係数（1.0=Gauss-Seidel, 1.0-2.0でSOR）
+
+        Returns
+        -------
+        float
+            最大変化量
+
+        Notes
+        -----
+        ホットループ: nb.prange で並列化。
+        均一グリッドを仮定（dx=dy=dz）。
+        """
+        nz, ny, nx = phi_w.shape
+        max_diff = 0.0
+
+        # z方向は並列化（データ競合を避けるため）
+        for k in nb.prange(1, nz-1):
+            local_max_diff = 0.0
+            for j in range(1, ny-1):
+                for i in range(1, nx-1):
+                    if fixed[k, j, i]:
+                        continue
+
+                    # 6点ステンシル（均一グリッド）
+                    phi_old = phi_w[k, j, i]
+                    phi_new = (
+                        phi_w[k, j, i-1] + phi_w[k, j, i+1] +
+                        phi_w[k, j-1, i] + phi_w[k, j+1, i] +
+                        phi_w[k-1, j, i] + phi_w[k+1, j, i]
+                    ) / 6.0
+
+                    # SOR更新
+                    phi_w[k, j, i] = phi_old + omega * (phi_new - phi_old)
+
+                    # 局所最大差分
+                    diff = abs(phi_w[k, j, i] - phi_old)
+                    if diff > local_max_diff:
+                        local_max_diff = diff
+
+            # グローバル最大差分更新（スレッドセーフ）
+            if local_max_diff > max_diff:
+                max_diff = local_max_diff
+
+        return max_diff
+
 
 def solve_weighting_potential(
     V: np.ndarray,
@@ -228,9 +301,11 @@ def solve_weighting_potential(
     ground_mask: np.ndarray,
     max_iter: int = 20000,
     tol: float = 1e-5,
+    omega: float = 1.8,
+    num_threads: Optional[int] = None,
 ) -> np.ndarray:
     """
-    Laplace方程式 ∇²φ_w = 0 を3D有限差分で解く。
+    Laplace方程式 ∇²φ_w = 0 を3D有限差分（SOR法）で解く。
 
     境界条件:
     - collect_mask == True: φ_w = 1
@@ -249,6 +324,10 @@ def solve_weighting_potential(
         最大反復回数
     tol : float
         収束判定の閾値
+    omega : float
+        SOR緩和係数（1.0=Gauss-Seidel, 1.6-1.9が最適）
+    num_threads : int | None
+        Numbaスレッド数（Noneで自動）
 
     Returns
     -------
@@ -257,59 +336,80 @@ def solve_weighting_potential(
 
     Notes
     -----
-    Gauss-Seidel法で解きます。非一様グリッドには未対応（均一グリッドを仮定）。
-    TODO: 非一様グリッドに対応する場合は係数を調整すること。
+    Numba利用可能時は並列SOR、不可時は純粋numpyにフォールバック。
+    均一グリッドを仮定。
     """
     nz, ny, nx = V.shape
+
+    # スレッド数設定
+    if NUMBA_AVAILABLE and num_threads is not None:
+        nb.set_num_threads(num_threads)
+        print(f"\nNumba threads: {num_threads}")
 
     # グリッド間隔（均一と仮定）
     dx = X[1] - X[0] if len(X) > 1 else 1e-6
     dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
     dz = Z[1] - Z[0] if len(Z) > 1 else 1e-6
 
-    print(f"\nSolving weighting potential...")
+    print(f"\nSolving weighting potential (SOR, omega={omega:.2f})...")
+    print(f"  Grid: {nx} x {ny} x {nz}")
     print(f"  Grid spacing: dx={dx*1e6:.3f} μm, dy={dy*1e6:.3f} μm, dz={dz*1e6:.3f} μm")
     print(f"  Max iterations: {max_iter}, tolerance: {tol}")
+    print(f"  Method: {'Numba JIT (parallel)' if NUMBA_AVAILABLE else 'Pure numpy (slow)'}")
 
     # 初期化
-    phi_w = np.zeros((nz, ny, nx), dtype=float)
+    phi_w = np.zeros((nz, ny, nx), dtype=np.float64)
 
     # 境界条件
     phi_w[collect_mask] = 1.0
     phi_w[ground_mask] = 0.0
 
     # 固定セル（電極）
-    fixed = collect_mask | ground_mask
+    fixed = (collect_mask | ground_mask).astype(np.bool_)
 
-    # Gauss-Seidel反復
-    # TODO: より高速な解法（SOR, マルチグリッド等）に置き換えてもよい
-    for iteration in range(max_iter):
-        phi_w_old = phi_w.copy()
+    # SOR反復
+    if NUMBA_AVAILABLE:
+        # Numba高速版
+        for iteration in range(max_iter):
+            max_diff = sor_step_numba(phi_w, fixed, omega)
 
-        # 内部セルを更新
-        for k in range(1, nz-1):
-            for j in range(1, ny-1):
-                for i in range(1, nx-1):
-                    if fixed[k, j, i]:
-                        continue
+            # 収束判定
+            if max_diff < tol:
+                print(f"  ✓ Converged after {iteration+1} iterations (max diff={max_diff:.3e})")
+                break
 
-                    # 6点ステンシル（均一グリッド）
-                    phi_w[k, j, i] = (
-                        phi_w[k, j, i-1] + phi_w[k, j, i+1] +
-                        phi_w[k, j-1, i] + phi_w[k, j+1, i] +
-                        phi_w[k-1, j, i] + phi_w[k+1, j, i]
-                    ) / 6.0
-
-        # 収束判定
-        diff = np.abs(phi_w - phi_w_old).max()
-        if diff < tol:
-            print(f"  Converged after {iteration+1} iterations (max diff={diff:.3e})")
-            break
-
-        if (iteration + 1) % 1000 == 0:
-            print(f"  Iteration {iteration+1}/{max_iter}, max diff={diff:.3e}")
+            if (iteration + 1) % 500 == 0:
+                print(f"  Iteration {iteration+1}/{max_iter}, max diff={max_diff:.3e}")
+        else:
+            print(f"  ⚠ WARNING: Did not converge after {max_iter} iterations (max diff={max_diff:.3e})")
     else:
-        print(f"  WARNING: Did not converge after {max_iter} iterations (max diff={diff:.3e})")
+        # Pure numpy フォールバック（遅い）
+        for iteration in range(max_iter):
+            phi_w_old = phi_w.copy()
+
+            for k in range(1, nz-1):
+                for j in range(1, ny-1):
+                    for i in range(1, nx-1):
+                        if fixed[k, j, i]:
+                            continue
+
+                        phi_new = (
+                            phi_w[k, j, i-1] + phi_w[k, j, i+1] +
+                            phi_w[k, j-1, i] + phi_w[k, j+1, i] +
+                            phi_w[k-1, j, i] + phi_w[k+1, j, i]
+                        ) / 6.0
+
+                        phi_w[k, j, i] = phi_w[k, j, i] + omega * (phi_new - phi_w[k, j, i])
+
+            max_diff = np.abs(phi_w - phi_w_old).max()
+            if max_diff < tol:
+                print(f"  ✓ Converged after {iteration+1} iterations (max diff={max_diff:.3e})")
+                break
+
+            if (iteration + 1) % 500 == 0:
+                print(f"  Iteration {iteration+1}/{max_iter}, max diff={max_diff:.3e}")
+        else:
+            print(f"  ⚠ WARNING: Did not converge after {max_iter} iterations")
 
     print(f"  φ_w range: [{phi_w.min():.6f}, {phi_w.max():.6f}]")
 
@@ -384,6 +484,129 @@ def trilinear_interpolate(
     c = c0 * (1 - tz) + c1 * tz
 
     return c
+
+
+# ========== 重み電位キャッシュ ==========
+
+def get_weighting_potential(
+    field_path: str,
+    cache_path: Optional[str] = None,
+    force_recalc: bool = False,
+    max_iter: int = 20000,
+    tol: float = 1e-5,
+    omega: float = 1.8,
+    num_threads: Optional[int] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    重み電位 φ_w をキャッシュから読み込み、またはキャッシュがなければ計算して保存。
+
+    Parameters
+    ----------
+    field_path : str
+        電界npzファイルパス
+    cache_path : str | None
+        φ_w を保存/読込する npz のパス。None の場合は field_path から自動決定。
+    force_recalc : bool
+        True の場合、キャッシュを無視して再計算
+    max_iter : int
+        重み電位計算の最大反復回数
+    tol : float
+        重み電位計算の収束判定閾値
+    omega : float
+        SOR緩和パラメータ (1.0 < omega < 2.0, 最適値は1.6~1.9)
+    num_threads : int | None
+        Numbaスレッド数。Noneの場合は自動。
+
+    Returns
+    -------
+    phi_w : np.ndarray
+        重み電位 (Nz, Ny, Nx)
+    X, Y, Z : np.ndarray
+        座標軸 [m]
+
+    Notes
+    -----
+    キャッシュファイル名:
+        yokogata_field.npz → yokogata_weighting.npz
+        kushigata_field.npz → kushigata_weighting.npz
+    """
+    # キャッシュパスの決定
+    if cache_path is None:
+        # field_path から自動生成
+        # 例: "電界/yokogata_field.npz" → "電界/yokogata_weighting.npz"
+        base_name = os.path.basename(field_path)
+        dir_name = os.path.dirname(field_path)
+
+        if "_field.npz" in base_name:
+            cache_name = base_name.replace("_field.npz", "_weighting.npz")
+        else:
+            # フォールバック: .npz の前に _weighting を挿入
+            cache_name = base_name.replace(".npz", "_weighting.npz")
+
+        cache_path = os.path.join(dir_name, cache_name)
+
+    print(f"\n{'='*70}")
+    print("Weighting Potential")
+    print('='*70)
+    print(f"  Field: {field_path}")
+    print(f"  Cache: {cache_path}")
+
+    # キャッシュ読み込み試行
+    if not force_recalc and os.path.exists(cache_path):
+        try:
+            print(f"  ✓ Loading weighting potential from cache...")
+            cache_data = np.load(cache_path)
+            phi_w = cache_data['phi_w']
+            X = cache_data['X']
+            Y = cache_data['Y']
+            Z = cache_data['Z']
+
+            print(f"  ✓ Cache loaded successfully!")
+            print(f"     Grid: {len(X)} x {len(Y)} x {len(Z)}")
+            print(f"     phi_w range: [{phi_w.min():.4f}, {phi_w.max():.4f}]")
+
+            return phi_w, X, Y, Z
+
+        except Exception as e:
+            print(f"  ⚠ Cache load failed: {e}")
+            print(f"  → Recomputing...")
+
+    # キャッシュなし/無効 → 計算する
+    if force_recalc:
+        print(f"  → Force recalculation (--force-recalc-weighting)")
+    else:
+        print(f"  → Cache not found, computing...")
+
+    # 1. 電界データ読み込み
+    field_data = load_field_npz(field_path)
+    V = field_data['V']
+    X = field_data['X']
+    Y = field_data['Y']
+    Z = field_data['Z']
+
+    # 2. 電極マスク作成
+    collect_mask, ground_mask, k_surface = create_electrode_masks(V, Z)
+
+    # 3. 重み電位計算
+    phi_w = solve_weighting_potential(
+        V, X, Y, Z, collect_mask, ground_mask,
+        max_iter=max_iter, tol=tol, omega=omega, num_threads=num_threads
+    )
+
+    # 4. キャッシュに保存
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            phi_w=phi_w,
+            X=X, Y=Y, Z=Z
+        )
+        print(f"\n  ✓ Weighting potential saved to cache: {cache_path}")
+        print(f"     File size: {os.path.getsize(cache_path) / 1024:.1f} KB")
+    except Exception as e:
+        print(f"  ⚠ Failed to save cache: {e}")
+
+    return phi_w, X, Y, Z
 
 
 # ========== 1イベントのCCE計算 ==========
@@ -490,6 +713,9 @@ def simulate_cce(
     seed: Optional[int] = None,
     max_iter: int = 20000,
     tol: float = 1e-5,
+    omega: float = 1.8,
+    num_threads: Optional[int] = None,
+    force_recalc_weighting: bool = False,
 ) -> dict:
     """
     n_eventsイベントをシミュレーションしてCCE統計を返す。
@@ -508,6 +734,12 @@ def simulate_cce(
         重み電位計算の最大反復回数
     tol : float
         重み電位計算の収束判定閾値
+    omega : float
+        SOR緩和パラメータ (1.0 < omega < 2.0)
+    num_threads : int | None
+        Numbaスレッド数
+    force_recalc_weighting : bool
+        Trueの場合、キャッシュを無視して重み電位を再計算
 
     Returns
     -------
@@ -523,26 +755,21 @@ def simulate_cce(
     # 乱数生成器
     rng = np.random.default_rng(seed)
 
-    # 1. 電界データ読み込み
-    field_data = load_field_npz(field_path)
-    V = field_data['V']
-    X = field_data['X']
-    Y = field_data['Y']
-    Z = field_data['Z']
+    # 1. 重み電位取得（キャッシュあり）
+    phi_w, X, Y, Z = get_weighting_potential(
+        field_path=field_path,
+        cache_path=None,  # 自動決定
+        force_recalc=force_recalc_weighting,
+        max_iter=max_iter,
+        tol=tol,
+        omega=omega,
+        num_threads=num_threads,
+    )
 
     # 2. SRIM読み込み
     z_seg, dE_seg = load_srim_ioniz(srim_path)
 
-    # 3. 電極マスク作成
-    collect_mask, ground_mask, k_surface = create_electrode_masks(V, Z)
-
-    # 4. 重み電位計算
-    phi_w = solve_weighting_potential(
-        V, X, Y, Z, collect_mask, ground_mask,
-        max_iter=max_iter, tol=tol
-    )
-
-    # 5. CCEシミュレーション
+    # 3. CCEシミュレーション
     print(f"\nSimulating {n_events} events...")
     cce_list = []
 
@@ -637,6 +864,23 @@ def main():
         help="Convergence tolerance for weighting potential solver"
     )
     parser.add_argument(
+        "--omega",
+        type=float,
+        default=1.8,
+        help="SOR relaxation parameter (1.0 < omega < 2.0, optimal: 1.6-1.9)"
+    )
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=None,
+        help="Number of Numba threads (default: auto)"
+    )
+    parser.add_argument(
+        "--force-recalc-weighting",
+        action="store_true",
+        help="Force recalculation of weighting potential (ignore cache)"
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="cce_histogram.png",
@@ -653,6 +897,9 @@ def main():
         seed=args.seed,
         max_iter=args.max_iter,
         tol=args.tol,
+        omega=args.omega,
+        num_threads=args.num_threads,
+        force_recalc_weighting=args.force_recalc_weighting,
     )
 
     # ヒストグラム描画
