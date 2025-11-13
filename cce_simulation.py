@@ -941,7 +941,7 @@ def main():
         {
             'name': '横型',
             'field_file': '電界/yokogata_field.npz',
-            'exp_file': 'data/SiC2_500_10_clear_α_20250124_142116_100.0V.csv',
+            'exp_file': '実験データ/SiC2_500_10_clear_α_20250124_142116_100.0V.csv',
             'output_prefix': 'yokogata_',
             # Windows パス（必要に応じてコメント外す）
             # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz',
@@ -950,7 +950,7 @@ def main():
         {
             'name': 'くし形',
             'field_file': '電界/kushigata_field.npz',
-            'exp_file': 'data/くし形100V_204222.csv',
+            'exp_file': '実験データ/くし形100V_204222.csv',
             'output_prefix': 'kushigata_',
             # Windows パス（必要に応じてコメント外す）
             # 'field_file': r'C:\Users\discu\デスクトップ\python\cce\電界\kushigata_field.npz',

@@ -182,10 +182,8 @@ def check_srim_file(srim_file):
 
 
 def check_exp_file(exp_file):
-    """実験データファイルのチェック"""
-    print(f"\n{'='*60}")
+    """実験データファイルのチェック（横型とくし形の両方に対応）"""
     print(f"Checking experimental data file: {exp_file}")
-    print('='*60)
 
     if not os.path.exists(exp_file):
         print(f"⚠ WARNING: File not found!")
@@ -194,25 +192,74 @@ def check_exp_file(exp_file):
         return False
 
     try:
-        df = pd.read_csv(exp_file)
-        print(f"✓ File loaded successfully")
-        print(f"  Number of events: {len(df)}")
+        # ファイルフォーマットの自動判定
+        # くし形: 22行ヘッダー + ヒストグラムデータ（ビンセンタ、カウント数）
+        # 横型: タブ区切りのイベントデータ（WaveformIndex, ..., PeakHeight）
 
-        # カラムをチェック
-        print(f"\n  Available columns:")
-        for col in df.columns:
-            print(f"    - {col}")
+        # まず最初の数行を読んで判定
+        with open(exp_file, 'r', encoding='utf-8', errors='ignore') as f:
+            first_lines = [f.readline() for _ in range(25)]
 
-        if 'PeakHeight' not in df.columns:
-            print(f"⚠ WARNING: 'PeakHeight' column not found")
-            print(f"   Experimental comparison may not work correctly")
+        # くし形の判定: 22行以上のヘッダーがあり、数値データが続く
+        is_kushigata = False
+        if len(first_lines) > 22:
+            # 23行目（index=22）が数値データかチェック
+            try:
+                parts = first_lines[22].split()
+                if len(parts) >= 2:
+                    float(parts[0])
+                    float(parts[1])
+                    is_kushigata = True
+            except:
+                pass
+
+        if is_kushigata:
+            # くし形: ヒストグラムデータ
+            print(f"✓ Detected Kushigata format (histogram data)")
+            df = pd.read_csv(
+                exp_file,
+                skiprows=22,
+                sep=r'\s+',  # 空白区切り
+                header=None,
+                names=['BinCenter', 'Counts']
+            )
+            print(f"  Number of bins: {len(df)}")
+
+            bin_center = df['BinCenter'].values
+            counts = df['Counts'].values
+
+            print(f"\n  Histogram range:")
+            print(f"    BinCenter: [{bin_center.min():.3f}, {bin_center.max():.3f}]")
+            print(f"    Total counts: {counts.sum():.0f}")
+            print(f"    Mean counts per bin: {counts.mean():.1f}")
+
         else:
-            peak_height = df['PeakHeight'].values
-            print(f"\n  PeakHeight statistics:")
-            print(f"    Mean: {peak_height.mean():.3f} V")
-            print(f"    Std:  {peak_height.std():.3f} V")
-            print(f"    Min:  {peak_height.min():.3f} V")
-            print(f"    Max:  {peak_height.max():.3f} V")
+            # 横型: イベントデータ（タブまたはカンマ区切り）
+            print(f"✓ Detected Yokogata format (event data)")
+            try:
+                df = pd.read_csv(exp_file, sep='\t')
+                if len(df.columns) == 1:
+                    df = pd.read_csv(exp_file, sep=',')
+            except:
+                df = pd.read_csv(exp_file, sep=',')
+
+            print(f"  Number of events: {len(df)}")
+
+            # カラムをチェック
+            print(f"\n  Available columns:")
+            for col in df.columns:
+                print(f"    - {col}")
+
+            if 'PeakHeight' not in df.columns:
+                print(f"⚠ WARNING: 'PeakHeight' column not found")
+                print(f"   Experimental comparison may not work correctly")
+            else:
+                peak_height = df['PeakHeight'].values
+                print(f"\n  PeakHeight statistics:")
+                print(f"    Mean: {peak_height.mean():.3f}")
+                print(f"    Std:  {peak_height.std():.3f}")
+                print(f"    Min:  {peak_height.min():.3f}")
+                print(f"    Max:  {peak_height.max():.3f}")
 
         print(f"\n✅ Experimental data file is valid!")
         return True
@@ -229,15 +276,35 @@ def main():
     print("="*60)
 
     # ファイルパス（cce_simulation.pyと同じ）
-    field_file = '電界/yokogata_field.npz'
+    field_files = [
+        ('横型', '電界/yokogata_field.npz'),
+        ('くし形', '電界/kushigata_field.npz')
+    ]
     srim_file = 'data/5486keVαinSiCIONIZ.txt'
-    exp_file = 'data/SiC2_500_10_clear_α_20250124_142116_100.0V.csv'
+    exp_files = [
+        ('横型', '実験データ/SiC2_500_10_clear_α_20250124_142116_100.0V.csv'),
+        ('くし形', '実験データ/くし形100V_204222.csv')
+    ]
 
     # チェック実行
     results = {}
-    results['field'] = check_field_file(field_file)
+
+    # 電界ファイル
+    for name, field_file in field_files:
+        print(f"\n{'='*60}")
+        print(f"Field file for {name}")
+        print('='*60)
+        results[f'field_{name}'] = check_field_file(field_file)
+
+    # SRIM
     results['srim'] = check_srim_file(srim_file)
-    results['exp'] = check_exp_file(exp_file)
+
+    # 実験データ
+    for name, exp_file in exp_files:
+        print(f"\n{'='*60}")
+        print(f"Experimental data for {name}")
+        print('='*60)
+        results[f'exp_{name}'] = check_exp_file(exp_file)
 
     # 結果サマリー
     print("\n" + "="*60)
@@ -245,12 +312,22 @@ def main():
     print("="*60)
 
     status_icon = lambda x: "✅" if x else "❌"
-    print(f"{status_icon(results['field'])} Field data: {field_file}")
-    print(f"{status_icon(results['srim'])} SRIM data: {srim_file}")
-    print(f"{'✅' if results['exp'] else '⚠'} Experimental data: {exp_file}")
+    print("\nField data:")
+    for name, field_file in field_files:
+        print(f"  {status_icon(results[f'field_{name}'])} {name}: {field_file}")
 
-    if results['field'] and results['srim']:
-        print("\n✅ All required data files are ready!")
+    print(f"\nSRIM data:")
+    print(f"  {status_icon(results['srim'])} {srim_file}")
+
+    print(f"\nExperimental data:")
+    for name, exp_file in exp_files:
+        status = results[f'exp_{name}']
+        print(f"  {status_icon(status) if status else '⚠'} {name}: {exp_file}")
+
+    # 必須ファイル（電界とSRIM）がOKかチェック
+    field_ok = any(results[f'field_{name}'] for name, _ in field_files)
+    if field_ok and results['srim']:
+        print("\n✅ Required data files are ready!")
         print("   You can now run: python cce_simulation.py")
         return 0
     else:
