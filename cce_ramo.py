@@ -1314,6 +1314,9 @@ def compute_cce_ramo_drift(
     Ex: np.ndarray,
     Ey: np.ndarray,
     Ez: np.ndarray,
+    X_field: np.ndarray,
+    Y_field: np.ndarray,
+    Z_field: np.ndarray,
     z_seg: np.ndarray,
     dE_seg: np.ndarray,
     x_event: float,
@@ -1330,9 +1333,11 @@ def compute_cce_ramo_drift(
     phi_w : np.ndarray
         重み電位, shape (nz, ny, nx)
     X, Y, Z : np.ndarray
-        座標軸 [m]
+        重み電位の座標軸 [m]
     Ex, Ey, Ez : np.ndarray
-        電界成分 [V/m], shape (nz, ny, nx)
+        電界成分 [V/m], shape (nz_field, ny_field, nx_field)
+    X_field, Y_field, Z_field : np.ndarray
+        電界データの座標軸 [m]
     z_seg : np.ndarray
         SRIMセグメントの深さ [m]（入射面からの距離）
     dE_seg : np.ndarray
@@ -1357,9 +1362,9 @@ def compute_cce_ramo_drift(
     - 電子のみが信号に寄与（正孔は無視）
     - z 方向の1D近似ドリフト
     - 有限寿命 τ_e による再結合損失を考慮
-    - 電界データは z=410〜430 μm のみ含む → バルク領域は近似
+    - 電界データと重み電位データの座標系が異なる場合に対応
 
-    TODO: バルク領域（z < Z.min()）の電界は、表面領域の平均値で近似しています。
+    TODO: バルク領域（z < Z_field.min()）の電界は、表面領域の平均値で近似しています。
           より精密なモデルでは、バルク電界の実測値または理論モデルが必要です。
     """
     # 総e-hペア数と生成電荷
@@ -1389,12 +1394,12 @@ def compute_cce_ramo_drift(
         # collect 電極までの距離（z方向の1D近似）
         d_i = z_seg[i]  # [m]
 
-        # 電界の取得
-        if z_i >= Z[0] and z_i <= Z[-1]:
+        # 電界の取得（電界データの座標系 X_field, Y_field, Z_field を使用）
+        if z_i >= Z_field[0] and z_i <= Z_field[-1]:
             # z が電界データの範囲内 → 補間で取得
-            Ex_i = trilinear_interpolate(Ex, X, Y, Z, x_event, y_event, z_i)
-            Ey_i = trilinear_interpolate(Ey, X, Y, Z, x_event, y_event, z_i)
-            Ez_i = trilinear_interpolate(Ez, X, Y, Z, x_event, y_event, z_i)
+            Ex_i = trilinear_interpolate(Ex, X_field, Y_field, Z_field, x_event, y_event, z_i)
+            Ey_i = trilinear_interpolate(Ey, X_field, Y_field, Z_field, x_event, y_event, z_i)
+            Ez_i = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_event, y_event, z_i)
             E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
         else:
             # z が電界データの範囲外（バルク領域）→ 近似値を使用
@@ -1585,6 +1590,9 @@ def simulate_cce(
         Ex = field_data['Ex']
         Ey = field_data['Ey']
         Ez = field_data['Ez']
+        X_field = field_data['X']
+        Y_field = field_data['Y']
+        Z_field = field_data['Z']
 
         z_surface = Z[-1]  # 入射面（表面）
 
@@ -1594,7 +1602,7 @@ def simulate_cce(
             y_event = rng.uniform(Y[0], Y[-1])
 
             cce = compute_cce_ramo_drift(
-                phi_w, X, Y, Z, Ex, Ey, Ez,
+                phi_w, X, Y, Z, Ex, Ey, Ez, X_field, Y_field, Z_field,
                 z_seg, dE_seg,
                 x_event, y_event, z_surface,
                 mu_e, tau_e
