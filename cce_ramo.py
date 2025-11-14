@@ -1455,6 +1455,7 @@ def simulate_cce(
     tol: float = 1e-5,
     omega: float = 1.8,
     force_recalc_weighting: bool = False,
+    use_fullthick: bool = True,
     field_path: Optional[str] = None,
     srim_path: Optional[str] = None,
 ) -> dict:
@@ -1485,6 +1486,8 @@ def simulate_cce(
         SOR緩和パラメータ (1.0 < omega < 2.0)
     force_recalc_weighting : bool
         Trueの場合、キャッシュを無視して重み電位を再計算
+    use_fullthick : bool
+        Trueの場合、全厚メッシュ（z=0-430μm）で重み電位を計算
     field_path : str | None
         電界npzファイルパス（Noneの場合はdetector_typeから自動決定）
     srim_path : str | None
@@ -1521,15 +1524,30 @@ def simulate_cce(
     rng = np.random.default_rng(seed)
 
     # 1. 重み電位取得（キャッシュあり）
-    phi_w, X, Y, Z = get_weighting_potential(
-        field_path=field_path,
-        cache_path=None,  # 自動決定
-        force_recalc=force_recalc_weighting,
-        max_iter=max_iter,
-        tol=tol,
-        omega=omega,
-        num_threads=num_threads,
-    )
+    if use_fullthick:
+        print(f"  Using full-thickness weighting potential (z=0-430 μm)")
+        phi_w, X, Y, Z = get_weighting_potential_fullthickness(
+            field_path=field_path,
+            cache_path=None,  # 自動決定
+            force_recalc=force_recalc_weighting,
+            z_max=430e-6,
+            target_dz=2.5e-6,
+            max_iter=max_iter,
+            tol=tol,
+            omega=omega,
+            num_threads=num_threads,
+        )
+    else:
+        print(f"  Using standard weighting potential")
+        phi_w, X, Y, Z = get_weighting_potential(
+            field_path=field_path,
+            cache_path=None,  # 自動決定
+            force_recalc=force_recalc_weighting,
+            max_iter=max_iter,
+            tol=tol,
+            omega=omega,
+            num_threads=num_threads,
+        )
 
     # 2. SRIM読み込み
     z_seg, dE_seg = load_srim_ioniz(srim_path)
@@ -1708,6 +1726,18 @@ def main_cli():
         help="Force recalculation of weighting potential (ignore cache)"
     )
     parser.add_argument(
+        "--use-fullthick",
+        action="store_true",
+        default=True,
+        help="Use full-thickness weighting potential (z=0-430 μm, default: True)"
+    )
+    parser.add_argument(
+        "--no-fullthick",
+        action="store_false",
+        dest="use_fullthick",
+        help="Use standard weighting potential instead of full-thickness"
+    )
+    parser.add_argument(
         "--field",
         type=str,
         default=None,
@@ -1741,6 +1771,7 @@ def main_cli():
         tol=args.tol,
         omega=args.omega,
         force_recalc_weighting=args.force_recalc_weighting,
+        use_fullthick=args.use_fullthick,
         field_path=args.field,
         srim_path=args.srim,
     )
@@ -1890,7 +1921,31 @@ if TKINTER_AVAILABLE:
                 row=row, column=2, sticky=tk.W, padx=5
             )
             row += 1
-    
+
+            # === Weighting potential options ===
+            ttk.Label(param_frame, text="Weighting options:", font=("", 9, "bold")).grid(
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(10, 2)
+            )
+            row += 1
+
+            # Use full-thickness
+            self.cce_use_fullthick_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(
+                param_frame,
+                text="Use full-thickness (0-430 μm)",
+                variable=self.cce_use_fullthick_var
+            ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+            # Force recalculation
+            self.cce_force_recalc_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                param_frame,
+                text="Force recalc weighting potential",
+                variable=self.cce_force_recalc_var
+            ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
             # カラム幅調整
             param_frame.columnconfigure(1, weight=1)
     
@@ -1952,17 +2007,21 @@ if TKINTER_AVAILABLE:
             try:
                 detector_str = self.detector_var.get()
                 detector_type = "yoko" if "Yokogata" in detector_str else "kushi"
-    
+
                 mode_str = self.mode_var.get()
                 mode = "ramo_ideal" if "Ideal" in mode_str else "ramo_drift"
-    
+
                 n_events = int(self.events_var.get())
                 mu_e = float(self.mu_e_var.get())
                 tau_e = float(self.tau_e_var.get())
-    
+
                 threads_str = self.threads_var.get().strip()
                 num_threads = int(threads_str) if threads_str else None
-    
+
+                # Weighting options
+                use_fullthick = self.cce_use_fullthick_var.get()
+                force_recalc = self.cce_force_recalc_var.get()
+
             except ValueError as e:
                 messagebox.showerror("Input Error", f"Invalid parameter: {e}")
                 return
@@ -1976,17 +2035,19 @@ if TKINTER_AVAILABLE:
             self.log(f"  μ_e: {mu_e} cm²/Vs")
             self.log(f"  τ_e: {tau_e} s")
             self.log(f"  Threads: {num_threads if num_threads else 'auto'}")
+            self.log(f"  Use full-thickness: {use_fullthick}")
+            self.log(f"  Force recalc weighting: {force_recalc}")
             self.log("")
-    
+
             # 結果をクリア
             self.result_label.config(text="Running...", foreground="blue")
             self.run_button.config(state="disabled")
             self.running = True
-    
+
             # バックグラウンドで実行（GUIフリーズを防ぐ）
             thread = threading.Thread(
                 target=self._run_simulation_thread,
-                args=(detector_type, mode, n_events, mu_e, tau_e, num_threads),
+                args=(detector_type, mode, n_events, mu_e, tau_e, num_threads, use_fullthick, force_recalc),
                 daemon=True
             )
             thread.start()
@@ -1998,13 +2059,15 @@ if TKINTER_AVAILABLE:
             n_events: int,
             mu_e: float,
             tau_e: float,
-            num_threads: Optional[int]
+            num_threads: Optional[int],
+            use_fullthick: bool,
+            force_recalc: bool,
         ):
             """バックグラウンドスレッドでシミュレーション実行"""
             try:
                 # stdout をキャプチャするため、簡易版として直接 log() に出力
                 # （実際の stdout リダイレクトは複雑なので、ここでは省略）
-    
+
                 # シミュレーション実行
                 results = simulate_cce(
                     detector_type=detector_type,
@@ -2014,6 +2077,8 @@ if TKINTER_AVAILABLE:
                     tau_e=tau_e,
                     num_threads=num_threads,
                     seed=None,
+                    force_recalc_weighting=force_recalc,
+                    use_fullthick=use_fullthick,
                 )
     
                 # 結果表示
