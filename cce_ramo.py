@@ -838,15 +838,16 @@ def compute_cce_ramo_drift(
     if N_total == 0:
         return 0.0
 
-    # 各セグメントの重み
-    w_i = N_i / N_total
-
-    # 誘導電荷の計算
+    # 誘導電荷の計算（N_i個のキャリア分を直接計算）
     Q_induced = 0.0
 
     # バルク領域の代表電界値（Z範囲内の平均）
     # TODO: より精密な近似が必要な場合はここを改良
     E_mag_bulk = np.sqrt(Ex**2 + Ey**2 + Ez**2).mean()  # [V/m]
+
+    # バルク領域のφ_w近似値（表面に最も近い値を使用）
+    # z < Z.min() の場合は Z.min() 位置の φ_w を使う
+    phi_w_bulk_cache = {}  # (x_event, y_event) → φ_w at Z.min()
 
     for i in range(len(z_seg)):
         # セグメント i の生成位置
@@ -881,19 +882,26 @@ def compute_cce_ramo_drift(
         # 生存確率（再結合による損失）
         f_survival = np.exp(-t_drift / tau_e)
 
-        # 重み電位（範囲内のみ）
+        # 重み電位
         if z_i >= Z[0] and z_i <= Z[-1]:
+            # 範囲内 → 補間
             phi_w_i = trilinear_interpolate(phi_w, X, Y, Z, x_event, y_event, z_i)
         else:
-            # 範囲外の場合はスキップ（寄与なし）
-            continue
+            # 範囲外（バルク領域、z < Z.min()）
+            # → Z.min() 位置のφ_wで近似（表面に最も近い値）
+            # TODO: より精密なモデルが必要な場合はここを改良
+            if (x_event, y_event) not in phi_w_bulk_cache:
+                phi_w_bulk_cache[(x_event, y_event)] = trilinear_interpolate(
+                    phi_w, X, Y, Z, x_event, y_event, Z[0]
+                )
+            phi_w_i = phi_w_bulk_cache[(x_event, y_event)]
 
-        # 電子のみの誘導電荷（Shockley-Ramo）
-        # Q_e = e * f_survival * (1 - φ_w(start))
-        Q_e_i = Q_E * f_survival * (1 - phi_w_i)
+        # N_i[i] 個のキャリアが誘起する電荷（Shockley-Ramo）
+        # Q_e = N_i * e * f_survival * (1 - φ_w(start))
+        Q_e_i = N_i[i] * Q_E * f_survival * (1 - phi_w_i)
 
-        # 重み付けして加算（w_i[i] はこのセグメントの重み）
-        Q_induced += w_i[i] * Q_e_i
+        # 加算
+        Q_induced += Q_e_i
 
     # CCE = 収集電荷 / 生成電荷
     cce = Q_induced / Q_gen if Q_gen > 0 else 0.0
