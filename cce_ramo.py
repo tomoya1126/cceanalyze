@@ -1232,689 +1232,693 @@ except ImportError:
     TKINTER_AVAILABLE = False
 
 
-class CCESimulationGUI(tk.Tk):
-    """
-    Shockley-Ramo CCE シミュレーション用 GUI
-
-    tkinter 標準ライブラリのみを使用したシンプルな GUI。
-    パラメータを入力して「Run Simulation」ボタンでシミュレーションを実行。
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.title("Shockley-Ramo CCE Simulator")
-        self.geometry("1200x800")
-
-        self.running = False
-        self.last_results = None  # 最後の結果を保存
-
-        # ウェイティングポテンシャルデータ
-        self.weight_data = None  # {phi_w, X, Y, Z, Ex, Ey, Ez}
-        self.field_path = None
-        self.weight_path = None
-
-        self._build_widgets()
-
-    def _build_widgets(self):
-        """ウィジェット配置（タブUI）"""
-        # メインフレーム
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-
-        # タブUIの作成
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(0, weight=1)
-
-        # タブ1: CCE Simulation（既存の内容）
-        self.tab_cce = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_cce, text="CCE Simulation")
-        self._build_cce_tab()
-
-        # タブ2: Weighting Potential（新規）
-        self.tab_weighting = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_weighting, text="Weighting Potential")
-        self._build_weighting_tab()
-
-        # タブ3: Diagnostics（新規）
-        self.tab_diagnostics = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_diagnostics, text="Diagnostics")
-        self._build_diagnostics_tab()
-
-    def _build_cce_tab(self):
-        """CCE Simulationタブの構築（既存の内容）"""
-        # メインフレーム（タブ内）
-        tab_frame = self.tab_cce
-        tab_frame.columnconfigure(0, weight=1)
-        tab_frame.rowconfigure(0, weight=1)
-
-        # === パラメータ入力エリア ===
-        param_frame = ttk.LabelFrame(tab_frame, text="Parameters", padding="10")
-        param_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
-
-        row = 0
-
-        # Detector Type
-        ttk.Label(param_frame, text="Detector:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.detector_var = tk.StringVar(value="Yokogata (横型)")
-        detector_combo = ttk.Combobox(
-            param_frame,
-            textvariable=self.detector_var,
-            values=["Yokogata (横型)", "Kushigata (くし形)"],
-            state="readonly",
-            width=25
-        )
-        detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
-        row += 1
-
-        # Mode
-        ttk.Label(param_frame, text="Mode:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.mode_var = tk.StringVar(value="Ideal (CCE=1, test)")
-        mode_combo = ttk.Combobox(
-            param_frame,
-            textvariable=self.mode_var,
-            values=["Ideal (CCE=1, test)", "Drift (μ,τ with field)"],
-            state="readonly",
-            width=25
-        )
-        mode_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
-        row += 1
-
-        # Events
-        ttk.Label(param_frame, text="Events:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.events_var = tk.StringVar(value="1000")
-        ttk.Entry(param_frame, textvariable=self.events_var, width=28).grid(
-            row=row, column=1, sticky=(tk.W, tk.E), pady=2
-        )
-        row += 1
-
-        # μ_e
-        ttk.Label(param_frame, text="μ_e [cm²/Vs]:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.mu_e_var = tk.StringVar(value="100.0")  # TODO: 実験値に合わせて調整
-        ttk.Entry(param_frame, textvariable=self.mu_e_var, width=28).grid(
-            row=row, column=1, sticky=(tk.W, tk.E), pady=2
-        )
-        row += 1
-
-        # τ_e
-        ttk.Label(param_frame, text="τ_e [s]:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.tau_e_var = tk.StringVar(value="1e-8")
-        ttk.Entry(param_frame, textvariable=self.tau_e_var, width=28).grid(
-            row=row, column=1, sticky=(tk.W, tk.E), pady=2
-        )
-        row += 1
-
-        # Threads
-        ttk.Label(param_frame, text="Threads:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.threads_var = tk.StringVar(value="")  # 空欄 = auto
-        ttk.Entry(param_frame, textvariable=self.threads_var, width=28).grid(
-            row=row, column=1, sticky=(tk.W, tk.E), pady=2
-        )
-        ttk.Label(param_frame, text="(empty = auto)", font=("", 8)).grid(
-            row=row, column=2, sticky=tk.W, padx=5
-        )
-        row += 1
-
-        # カラム幅調整
-        param_frame.columnconfigure(1, weight=1)
-
-        # === ボタンエリア ===
-        button_frame = ttk.Frame(tab_frame)
-        button_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=10)
-
-        self.run_button = ttk.Button(
-            button_frame,
-            text="Run Simulation",
-            command=self.run_simulation
-        )
-        self.run_button.pack(side=tk.LEFT, padx=5)
-
-        self.hist_button = ttk.Button(
-            button_frame,
-            text="Show Histogram",
-            command=self.show_histogram,
-            state="disabled"  # 最初は無効
-        )
-        self.hist_button.pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(button_frame, text="Quit", command=self.quit).pack(side=tk.LEFT, padx=5)
-
-        # === 結果サマリーエリア ===
-        result_frame = ttk.LabelFrame(tab_frame, text="Results", padding="10")
-        result_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
-
-        self.result_label = ttk.Label(result_frame, text="No results yet.", foreground="gray")
-        self.result_label.pack(anchor=tk.W)
-
-        # === ログエリア ===
-        log_frame = ttk.LabelFrame(tab_frame, text="Log", padding="10")
-        log_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        tab_frame.rowconfigure(3, weight=1)
-
-        self.log_text = scrolledtext.ScrolledText(
-            log_frame,
-            wrap=tk.WORD,
-            width=80,
-            height=20,
-            font=("Courier", 9)
-        )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
-    def log(self, message: str):
-        """ログエリアにメッセージを追加"""
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.update_idletasks()
-
-    def run_simulation(self):
-        """シミュレーション実行"""
-        if self.running:
-            messagebox.showwarning("Warning", "Simulation is already running!")
-            return
-
-        # パラメータ取得
-        try:
-            detector_str = self.detector_var.get()
-            detector_type = "yoko" if "Yokogata" in detector_str else "kushi"
-
-            mode_str = self.mode_var.get()
-            mode = "ramo_ideal" if "Ideal" in mode_str else "ramo_drift"
-
-            n_events = int(self.events_var.get())
-            mu_e = float(self.mu_e_var.get())
-            tau_e = float(self.tau_e_var.get())
-
-            threads_str = self.threads_var.get().strip()
-            num_threads = int(threads_str) if threads_str else None
-
-        except ValueError as e:
-            messagebox.showerror("Input Error", f"Invalid parameter: {e}")
-            return
-
-        # ログクリア
-        self.log_text.delete(1.0, tk.END)
-        self.log("Starting simulation...")
-        self.log(f"  Detector: {detector_type}")
-        self.log(f"  Mode: {mode}")
-        self.log(f"  Events: {n_events}")
-        self.log(f"  μ_e: {mu_e} cm²/Vs")
-        self.log(f"  τ_e: {tau_e} s")
-        self.log(f"  Threads: {num_threads if num_threads else 'auto'}")
-        self.log("")
-
-        # 結果をクリア
-        self.result_label.config(text="Running...", foreground="blue")
-        self.run_button.config(state="disabled")
-        self.running = True
-
-        # バックグラウンドで実行（GUIフリーズを防ぐ）
-        thread = threading.Thread(
-            target=self._run_simulation_thread,
-            args=(detector_type, mode, n_events, mu_e, tau_e, num_threads),
-            daemon=True
-        )
-        thread.start()
-
-    def _run_simulation_thread(
-        self,
-        detector_type: str,
-        mode: str,
-        n_events: int,
-        mu_e: float,
-        tau_e: float,
-        num_threads: Optional[int]
-    ):
-        """バックグラウンドスレッドでシミュレーション実行"""
-        try:
-            # stdout をキャプチャするため、簡易版として直接 log() に出力
-            # （実際の stdout リダイレクトは複雑なので、ここでは省略）
-
-            # シミュレーション実行
-            results = simulate_cce(
-                detector_type=detector_type,
-                n_events=n_events,
-                mode=mode,
-                mu_e=mu_e,
-                tau_e=tau_e,
-                num_threads=num_threads,
-                seed=None,
-            )
-
-            # 結果表示
-            mean_cce = results['mean']
-            std_cce = results['std']
-            min_cce = results['min']
-            max_cce = results['max']
-
-            self.log("\n" + "="*70)
-            self.log("SIMULATION COMPLETED")
-            self.log("="*70)
-            self.log(f"  Events: {n_events}")
-            self.log(f"  Mean CCE: {mean_cce:.4f} ± {std_cce:.4f}")
-            self.log(f"  Min CCE: {min_cce:.4f}")
-            self.log(f"  Max CCE: {max_cce:.4f}")
-
-            # 結果サマリー更新
-            result_text = (
-                f"Events: {n_events}  |  "
-                f"Mean: {mean_cce:.4f} ± {std_cce:.4f}  |  "
-                f"Min: {min_cce:.4f}  |  "
-                f"Max: {max_cce:.4f}"
-            )
-            self.result_label.config(text=result_text, foreground="green")
-
-            # 結果を保存してヒストグラムボタンを有効化
-            self.last_results = results
-            self.hist_button.config(state="normal")
-
-        except Exception as e:
-            import traceback
-            error_msg = traceback.format_exc()
-            self.log("\n" + "="*70)
-            self.log("ERROR")
-            self.log("="*70)
-            self.log(error_msg)
-            self.result_label.config(text="Error occurred (see log)", foreground="red")
-
-        finally:
-            # ボタンを再度有効化
-            self.run_button.config(state="normal")
+if TKINTER_AVAILABLE:
+    class CCESimulationGUI(tk.Tk):
+        """
+        Shockley-Ramo CCE シミュレーション用 GUI
+    
+        tkinter 標準ライブラリのみを使用したシンプルな GUI。
+        パラメータを入力して「Run Simulation」ボタンでシミュレーションを実行。
+        """
+    
+        def __init__(self):
+            super().__init__()
+            self.title("Shockley-Ramo CCE Simulator")
+            self.geometry("1200x800")
+    
             self.running = False
-
-    def show_histogram(self):
-        """CCE ヒストグラムを別ウィンドウに表示"""
-        if self.last_results is None:
-            messagebox.showwarning("Warning", "No results available. Run simulation first.")
-            return
-
-        try:
-            cce_list = self.last_results['cce_list']
-            cce_array = np.array(cce_list)
-
-            # matplotlib で別ウィンドウに表示
-            plt.figure(figsize=(10, 6))
-            plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black')
-            plt.axvline(cce_array.mean(), color='red', linestyle='--', linewidth=2,
-                        label=f'Mean = {cce_array.mean():.4f}')
-            plt.xlabel('CCE', fontsize=12)
-            plt.ylabel('Counts', fontsize=12)
-            plt.title(f'CCE Distribution (N={len(cce_list)})', fontsize=14)
-            plt.legend(fontsize=11)
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.show()
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to show histogram: {e}")
-
-    # ========== Weighting Potential タブ ==========
-
-    def _build_weighting_tab(self):
-        """Weighting Potentialタブの構築"""
-        tab_frame = self.tab_weighting
-        tab_frame.columnconfigure(1, weight=1)
-        tab_frame.rowconfigure(0, weight=1)
-
-        # 左側：コントロールパネル
-        control_frame = ttk.LabelFrame(tab_frame, text="Controls", padding="10")
-        control_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
-
-        row = 0
-
-        # Detectorタイプ選択
-        ttk.Label(control_frame, text="Detector:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        self.weight_detector_var = tk.StringVar(value="yoko")
-        detector_combo = ttk.Combobox(
-            control_frame,
-            textvariable=self.weight_detector_var,
-            values=["yoko", "kushi"],
-            state="readonly",
-            width=15
-        )
-        detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
-        row += 1
-
-        # Load button
-        ttk.Button(control_frame, text="Load Data", command=self.load_weighting_data).grid(
-            row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
-        )
-        row += 1
-
-        # Z slice slider
-        ttk.Label(control_frame, text="Z Slice:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        row += 1
-
-        self.z_slider = ttk.Scale(
-            control_frame,
-            from_=0,
-            to=10,
-            orient=tk.HORIZONTAL,
-            command=self.update_weighting_plot
-        )
-        self.z_slider.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
-        row += 1
-
-        self.z_label = ttk.Label(control_frame, text="z = ??? μm")
-        self.z_label.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
-        row += 1
-
-        # Display type
-        ttk.Label(control_frame, text="Display:").grid(row=row, column=0, sticky=tk.W, pady=2)
-        row += 1
-
-        self.display_var = tk.StringVar(value="phi_w")
-        for val, label in [("phi_w", "φ_w (Potential)"), ("|E_w|", "|E_w| (E-field mag)")]:
-            ttk.Radiobutton(
-                control_frame,
-                text=label,
-                variable=self.display_var,
-                value=val,
-                command=self.update_weighting_plot
-            ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            self.last_results = None  # 最後の結果を保存
+    
+            # ウェイティングポテンシャルデータ
+            self.weight_data = None  # {phi_w, X, Y, Z, Ex, Ey, Ez}
+            self.field_path = None
+            self.weight_path = None
+    
+            self._build_widgets()
+    
+        def _build_widgets(self):
+            """ウィジェット配置（タブUI）"""
+            # メインフレーム
+            main_frame = ttk.Frame(self, padding="10")
+            main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            self.columnconfigure(0, weight=1)
+            self.rowconfigure(0, weight=1)
+    
+            # タブUIの作成
+            self.notebook = ttk.Notebook(main_frame)
+            self.notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            main_frame.columnconfigure(0, weight=1)
+            main_frame.rowconfigure(0, weight=1)
+    
+            # タブ1: CCE Simulation（既存の内容）
+            self.tab_cce = ttk.Frame(self.notebook)
+            self.notebook.add(self.tab_cce, text="CCE Simulation")
+            self._build_cce_tab()
+    
+            # タブ2: Weighting Potential（新規）
+            self.tab_weighting = ttk.Frame(self.notebook)
+            self.notebook.add(self.tab_weighting, text="Weighting Potential")
+            self._build_weighting_tab()
+    
+            # タブ3: Diagnostics（新規）
+            self.tab_diagnostics = ttk.Frame(self.notebook)
+            self.notebook.add(self.tab_diagnostics, text="Diagnostics")
+            self._build_diagnostics_tab()
+    
+        def _build_cce_tab(self):
+            """CCE Simulationタブの構築（既存の内容）"""
+            # メインフレーム（タブ内）
+            tab_frame = self.tab_cce
+            tab_frame.columnconfigure(0, weight=1)
+            tab_frame.rowconfigure(0, weight=1)
+    
+            # === パラメータ入力エリア ===
+            param_frame = ttk.LabelFrame(tab_frame, text="Parameters", padding="10")
+            param_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+    
+            row = 0
+    
+            # Detector Type
+            ttk.Label(param_frame, text="Detector:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.detector_var = tk.StringVar(value="Yokogata (横型)")
+            detector_combo = ttk.Combobox(
+                param_frame,
+                textvariable=self.detector_var,
+                values=["Yokogata (横型)", "Kushigata (くし形)"],
+                state="readonly",
+                width=25
+            )
+            detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
             row += 1
-
-        # 右側：プロット領域
-        plot_frame = ttk.Frame(tab_frame)
-        plot_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
-        plot_frame.columnconfigure(0, weight=1)
-        plot_frame.rowconfigure(0, weight=1)
-
-        # Matplotlib figure
-        self.weight_fig = Figure(figsize=(8, 6))
-        self.weight_ax = self.weight_fig.add_subplot(111)
-        self.weight_canvas = FigureCanvasTkAgg(self.weight_fig, master=plot_frame)
-        self.weight_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-        # Toolbar (separate frame to avoid pack/grid conflict)
-        toolbar_frame = ttk.Frame(plot_frame)
-        toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
-        toolbar = NavigationToolbar2Tk(self.weight_canvas, toolbar_frame)
-        toolbar.update()
-
-        # Status label
-        self.weight_status = ttk.Label(plot_frame, text="No data loaded", foreground="gray")
-        self.weight_status.grid(row=2, column=0, sticky=tk.W, pady=2)
-
-    def load_weighting_data(self):
-        """ウェイティングデータを読み込み"""
-        detector_type = self.weight_detector_var.get()
-
-        try:
-            # パスを決定
-            base_dir = r"C:\Users\discu\デスクトップ\python\cce\電界"
-            if detector_type == "yoko":
-                self.field_path = os.path.join(base_dir, "yokogata_field.npz")
-                self.weight_path = os.path.join(base_dir, "yokogata_weighting.npz")
-            elif detector_type == "kushi":
-                self.field_path = os.path.join(base_dir, "kushigata_field.npz")
-                self.weight_path = os.path.join(base_dir, "kushigata_weighting.npz")
-
-            # データ読み込み
-            field_data = np.load(self.field_path)
-            weight_data_raw = np.load(self.weight_path)
-
-            # ウェイティング電界を計算（中央差分）
-            phi_w = weight_data_raw['phi_w']
-            X = weight_data_raw['X']
-            Y = weight_data_raw['Y']
-            Z = weight_data_raw['Z']
-
-            dx = X[1] - X[0] if len(X) > 1 else 1e-6
-            dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
-            dz = Z[1] - Z[0] if len(Z) > 1 else 1e-6
-
-            # E_w = -∇φ_w（中央差分）
-            E_wx = np.zeros_like(phi_w)
-            E_wy = np.zeros_like(phi_w)
-            E_wz = np.zeros_like(phi_w)
-
-            E_wx[:, :, 1:-1] = -(phi_w[:, :, 2:] - phi_w[:, :, :-2]) / (2 * dx)
-            E_wy[:, 1:-1, :] = -(phi_w[:, 2:, :] - phi_w[:, :-2, :]) / (2 * dy)
-            E_wz[1:-1, :, :] = -(phi_w[2:, :, :] - phi_w[:-2, :, :]) / (2 * dz)
-
-            self.weight_data = {
-                'phi_w': phi_w,
-                'X': X,
-                'Y': Y,
-                'Z': Z,
-                'E_wx': E_wx,
-                'E_wy': E_wy,
-                'E_wz': E_wz,
-            }
-
-            # Z sliderを更新
-            nz = len(Z)
-            self.z_slider.configure(from_=0, to=nz-1)
-            self.z_slider.set(nz-1)  # デフォルトは表面
-
-            self.weight_status.config(text=f"Loaded: {detector_type}, Grid: {len(X)}x{len(Y)}x{len(Z)}", foreground="green")
-            self.update_weighting_plot()
-
-        except FileNotFoundError as e:
-            messagebox.showerror("Error", f"File not found: {e}")
-            self.weight_status.config(text="Load failed", foreground="red")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load data: {e}")
-            self.weight_status.config(text="Load failed", foreground="red")
-
-    def update_weighting_plot(self, *args):
-        """ウェイティングプロットを更新"""
-        if self.weight_data is None:
-            return
-
-        try:
-            iz = int(self.z_slider.get())
-            display_type = self.display_var.get()
-
-            phi_w = self.weight_data['phi_w']
-            X = self.weight_data['X']
-            Y = self.weight_data['Y']
-            Z = self.weight_data['Z']
-
-            # Z label更新
-            self.z_label.config(text=f"z = {Z[iz]*1e6:.2f} μm")
-
-            # データ取得
-            if display_type == "phi_w":
-                data = phi_w[iz, :, :]
-                title = f"Weighting Potential φ_w at z={Z[iz]*1e6:.2f} μm"
-                cmap = 'viridis'
-            elif display_type == "|E_w|":
+    
+            # Mode
+            ttk.Label(param_frame, text="Mode:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.mode_var = tk.StringVar(value="Ideal (CCE=1, test)")
+            mode_combo = ttk.Combobox(
+                param_frame,
+                textvariable=self.mode_var,
+                values=["Ideal (CCE=1, test)", "Drift (μ,τ with field)"],
+                state="readonly",
+                width=25
+            )
+            mode_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+    
+            # Events
+            ttk.Label(param_frame, text="Events:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.events_var = tk.StringVar(value="1000")
+            ttk.Entry(param_frame, textvariable=self.events_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+    
+            # μ_e
+            ttk.Label(param_frame, text="μ_e [cm²/Vs]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.mu_e_var = tk.StringVar(value="100.0")  # TODO: 実験値に合わせて調整
+            ttk.Entry(param_frame, textvariable=self.mu_e_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+    
+            # τ_e
+            ttk.Label(param_frame, text="τ_e [s]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.tau_e_var = tk.StringVar(value="1e-8")
+            ttk.Entry(param_frame, textvariable=self.tau_e_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+    
+            # Threads
+            ttk.Label(param_frame, text="Threads:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.threads_var = tk.StringVar(value="")  # 空欄 = auto
+            ttk.Entry(param_frame, textvariable=self.threads_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            ttk.Label(param_frame, text="(empty = auto)", font=("", 8)).grid(
+                row=row, column=2, sticky=tk.W, padx=5
+            )
+            row += 1
+    
+            # カラム幅調整
+            param_frame.columnconfigure(1, weight=1)
+    
+            # === ボタンエリア ===
+            button_frame = ttk.Frame(tab_frame)
+            button_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=10)
+    
+            self.run_button = ttk.Button(
+                button_frame,
+                text="Run Simulation",
+                command=self.run_simulation
+            )
+            self.run_button.pack(side=tk.LEFT, padx=5)
+    
+            self.hist_button = ttk.Button(
+                button_frame,
+                text="Show Histogram",
+                command=self.show_histogram,
+                state="disabled"  # 最初は無効
+            )
+            self.hist_button.pack(side=tk.LEFT, padx=5)
+    
+            ttk.Button(button_frame, text="Quit", command=self.quit).pack(side=tk.LEFT, padx=5)
+    
+            # === 結果サマリーエリア ===
+            result_frame = ttk.LabelFrame(tab_frame, text="Results", padding="10")
+            result_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
+    
+            self.result_label = ttk.Label(result_frame, text="No results yet.", foreground="gray")
+            self.result_label.pack(anchor=tk.W)
+    
+            # === ログエリア ===
+            log_frame = ttk.LabelFrame(tab_frame, text="Log", padding="10")
+            log_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+            tab_frame.rowconfigure(3, weight=1)
+    
+            self.log_text = scrolledtext.ScrolledText(
+                log_frame,
+                wrap=tk.WORD,
+                width=80,
+                height=20,
+                font=("Courier", 9)
+            )
+            self.log_text.pack(fill=tk.BOTH, expand=True)
+    
+        def log(self, message: str):
+            """ログエリアにメッセージを追加"""
+            self.log_text.insert(tk.END, message + "\n")
+            self.log_text.see(tk.END)
+            self.update_idletasks()
+    
+        def run_simulation(self):
+            """シミュレーション実行"""
+            if self.running:
+                messagebox.showwarning("Warning", "Simulation is already running!")
+                return
+    
+            # パラメータ取得
+            try:
+                detector_str = self.detector_var.get()
+                detector_type = "yoko" if "Yokogata" in detector_str else "kushi"
+    
+                mode_str = self.mode_var.get()
+                mode = "ramo_ideal" if "Ideal" in mode_str else "ramo_drift"
+    
+                n_events = int(self.events_var.get())
+                mu_e = float(self.mu_e_var.get())
+                tau_e = float(self.tau_e_var.get())
+    
+                threads_str = self.threads_var.get().strip()
+                num_threads = int(threads_str) if threads_str else None
+    
+            except ValueError as e:
+                messagebox.showerror("Input Error", f"Invalid parameter: {e}")
+                return
+    
+            # ログクリア
+            self.log_text.delete(1.0, tk.END)
+            self.log("Starting simulation...")
+            self.log(f"  Detector: {detector_type}")
+            self.log(f"  Mode: {mode}")
+            self.log(f"  Events: {n_events}")
+            self.log(f"  μ_e: {mu_e} cm²/Vs")
+            self.log(f"  τ_e: {tau_e} s")
+            self.log(f"  Threads: {num_threads if num_threads else 'auto'}")
+            self.log("")
+    
+            # 結果をクリア
+            self.result_label.config(text="Running...", foreground="blue")
+            self.run_button.config(state="disabled")
+            self.running = True
+    
+            # バックグラウンドで実行（GUIフリーズを防ぐ）
+            thread = threading.Thread(
+                target=self._run_simulation_thread,
+                args=(detector_type, mode, n_events, mu_e, tau_e, num_threads),
+                daemon=True
+            )
+            thread.start()
+    
+        def _run_simulation_thread(
+            self,
+            detector_type: str,
+            mode: str,
+            n_events: int,
+            mu_e: float,
+            tau_e: float,
+            num_threads: Optional[int]
+        ):
+            """バックグラウンドスレッドでシミュレーション実行"""
+            try:
+                # stdout をキャプチャするため、簡易版として直接 log() に出力
+                # （実際の stdout リダイレクトは複雑なので、ここでは省略）
+    
+                # シミュレーション実行
+                results = simulate_cce(
+                    detector_type=detector_type,
+                    n_events=n_events,
+                    mode=mode,
+                    mu_e=mu_e,
+                    tau_e=tau_e,
+                    num_threads=num_threads,
+                    seed=None,
+                )
+    
+                # 結果表示
+                mean_cce = results['mean']
+                std_cce = results['std']
+                min_cce = results['min']
+                max_cce = results['max']
+    
+                self.log("\n" + "="*70)
+                self.log("SIMULATION COMPLETED")
+                self.log("="*70)
+                self.log(f"  Events: {n_events}")
+                self.log(f"  Mean CCE: {mean_cce:.4f} ± {std_cce:.4f}")
+                self.log(f"  Min CCE: {min_cce:.4f}")
+                self.log(f"  Max CCE: {max_cce:.4f}")
+    
+                # 結果サマリー更新
+                result_text = (
+                    f"Events: {n_events}  |  "
+                    f"Mean: {mean_cce:.4f} ± {std_cce:.4f}  |  "
+                    f"Min: {min_cce:.4f}  |  "
+                    f"Max: {max_cce:.4f}"
+                )
+                self.result_label.config(text=result_text, foreground="green")
+    
+                # 結果を保存してヒストグラムボタンを有効化
+                self.last_results = results
+                self.hist_button.config(state="normal")
+    
+            except Exception as e:
+                import traceback
+                error_msg = traceback.format_exc()
+                self.log("\n" + "="*70)
+                self.log("ERROR")
+                self.log("="*70)
+                self.log(error_msg)
+                self.result_label.config(text="Error occurred (see log)", foreground="red")
+    
+            finally:
+                # ボタンを再度有効化
+                self.run_button.config(state="normal")
+                self.running = False
+    
+        def show_histogram(self):
+            """CCE ヒストグラムを別ウィンドウに表示"""
+            if self.last_results is None:
+                messagebox.showwarning("Warning", "No results available. Run simulation first.")
+                return
+    
+            try:
+                cce_list = self.last_results['cce_list']
+                cce_array = np.array(cce_list)
+    
+                # matplotlib で別ウィンドウに表示
+                plt.figure(figsize=(10, 6))
+                plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black')
+                plt.axvline(cce_array.mean(), color='red', linestyle='--', linewidth=2,
+                            label=f'Mean = {cce_array.mean():.4f}')
+                plt.xlabel('CCE', fontsize=12)
+                plt.ylabel('Counts', fontsize=12)
+                plt.title(f'CCE Distribution (N={len(cce_list)})', fontsize=14)
+                plt.legend(fontsize=11)
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+    
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to show histogram: {e}")
+    
+        # ========== Weighting Potential タブ ==========
+    
+        def _build_weighting_tab(self):
+            """Weighting Potentialタブの構築"""
+            tab_frame = self.tab_weighting
+            tab_frame.columnconfigure(1, weight=1)
+            tab_frame.rowconfigure(0, weight=1)
+    
+            # 左側：コントロールパネル
+            control_frame = ttk.LabelFrame(tab_frame, text="Controls", padding="10")
+            control_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
+    
+            row = 0
+    
+            # Detectorタイプ選択
+            ttk.Label(control_frame, text="Detector:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.weight_detector_var = tk.StringVar(value="yoko")
+            detector_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.weight_detector_var,
+                values=["yoko", "kushi"],
+                state="readonly",
+                width=15
+            )
+            detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+    
+            # Load button
+            ttk.Button(control_frame, text="Load Data", command=self.load_weighting_data).grid(
+                row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
+            )
+            row += 1
+    
+            # Z slice slider
+            ttk.Label(control_frame, text="Z Slice:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            row += 1
+    
+            self.z_slider = ttk.Scale(
+                control_frame,
+                from_=0,
+                to=10,
+                orient=tk.HORIZONTAL,
+                command=self.update_weighting_plot
+            )
+            self.z_slider.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+    
+            self.z_label = ttk.Label(control_frame, text="z = ??? μm")
+            self.z_label.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+    
+            # Display type
+            ttk.Label(control_frame, text="Display:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            row += 1
+    
+            self.display_var = tk.StringVar(value="phi_w")
+            for val, label in [("phi_w", "φ_w (Potential)"), ("|E_w|", "|E_w| (E-field mag)")]:
+                ttk.Radiobutton(
+                    control_frame,
+                    text=label,
+                    variable=self.display_var,
+                    value=val,
+                    command=self.update_weighting_plot
+                ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+                row += 1
+    
+            # 右側：プロット領域
+            plot_frame = ttk.Frame(tab_frame)
+            plot_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
+            plot_frame.columnconfigure(0, weight=1)
+            plot_frame.rowconfigure(0, weight=1)
+    
+            # Matplotlib figure
+            self.weight_fig = Figure(figsize=(8, 6))
+            self.weight_ax = self.weight_fig.add_subplot(111)
+            self.weight_canvas = FigureCanvasTkAgg(self.weight_fig, master=plot_frame)
+            self.weight_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    
+            # Toolbar (separate frame to avoid pack/grid conflict)
+            toolbar_frame = ttk.Frame(plot_frame)
+            toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+            toolbar = NavigationToolbar2Tk(self.weight_canvas, toolbar_frame)
+            toolbar.update()
+    
+            # Status label
+            self.weight_status = ttk.Label(plot_frame, text="No data loaded", foreground="gray")
+            self.weight_status.grid(row=2, column=0, sticky=tk.W, pady=2)
+    
+        def load_weighting_data(self):
+            """ウェイティングデータを読み込み"""
+            detector_type = self.weight_detector_var.get()
+    
+            try:
+                # パスを決定
+                base_dir = r"C:\Users\discu\デスクトップ\python\cce\電界"
+                if detector_type == "yoko":
+                    self.field_path = os.path.join(base_dir, "yokogata_field.npz")
+                    self.weight_path = os.path.join(base_dir, "yokogata_weighting.npz")
+                elif detector_type == "kushi":
+                    self.field_path = os.path.join(base_dir, "kushigata_field.npz")
+                    self.weight_path = os.path.join(base_dir, "kushigata_weighting.npz")
+    
+                # データ読み込み
+                field_data = np.load(self.field_path)
+                weight_data_raw = np.load(self.weight_path)
+    
+                # ウェイティング電界を計算（中央差分）
+                phi_w = weight_data_raw['phi_w']
+                X = weight_data_raw['X']
+                Y = weight_data_raw['Y']
+                Z = weight_data_raw['Z']
+    
+                dx = X[1] - X[0] if len(X) > 1 else 1e-6
+                dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
+                dz = Z[1] - Z[0] if len(Z) > 1 else 1e-6
+    
+                # E_w = -∇φ_w（中央差分）
+                E_wx = np.zeros_like(phi_w)
+                E_wy = np.zeros_like(phi_w)
+                E_wz = np.zeros_like(phi_w)
+    
+                E_wx[:, :, 1:-1] = -(phi_w[:, :, 2:] - phi_w[:, :, :-2]) / (2 * dx)
+                E_wy[:, 1:-1, :] = -(phi_w[:, 2:, :] - phi_w[:, :-2, :]) / (2 * dy)
+                E_wz[1:-1, :, :] = -(phi_w[2:, :, :] - phi_w[:-2, :, :]) / (2 * dz)
+    
+                self.weight_data = {
+                    'phi_w': phi_w,
+                    'X': X,
+                    'Y': Y,
+                    'Z': Z,
+                    'E_wx': E_wx,
+                    'E_wy': E_wy,
+                    'E_wz': E_wz,
+                }
+    
+                # Z sliderを更新
+                nz = len(Z)
+                self.z_slider.configure(from_=0, to=nz-1)
+                self.z_slider.set(nz-1)  # デフォルトは表面
+    
+                self.weight_status.config(text=f"Loaded: {detector_type}, Grid: {len(X)}x{len(Y)}x{len(Z)}", foreground="green")
+                self.update_weighting_plot()
+    
+            except FileNotFoundError as e:
+                messagebox.showerror("Error", f"File not found: {e}")
+                self.weight_status.config(text="Load failed", foreground="red")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load data: {e}")
+                self.weight_status.config(text="Load failed", foreground="red")
+    
+        def update_weighting_plot(self, *args):
+            """ウェイティングプロットを更新"""
+            if self.weight_data is None:
+                return
+    
+            try:
+                iz = int(self.z_slider.get())
+                display_type = self.display_var.get()
+    
+                phi_w = self.weight_data['phi_w']
+                X = self.weight_data['X']
+                Y = self.weight_data['Y']
+                Z = self.weight_data['Z']
+    
+                # Z label更新
+                self.z_label.config(text=f"z = {Z[iz]*1e6:.2f} μm")
+    
+                # データ取得
+                if display_type == "phi_w":
+                    data = phi_w[iz, :, :]
+                    title = f"Weighting Potential φ_w at z={Z[iz]*1e6:.2f} μm"
+                    cmap = 'viridis'
+                elif display_type == "|E_w|":
+                    E_wx = self.weight_data['E_wx']
+                    E_wy = self.weight_data['E_wy']
+                    E_wz = self.weight_data['E_wz']
+                    data = np.sqrt(E_wx[iz, :, :]**2 + E_wy[iz, :, :]**2 + E_wz[iz, :, :]**2)
+                    title = f"|E_w| at z={Z[iz]*1e6:.2f} μm"
+                    cmap = 'hot'
+    
+                # プロット
+                self.weight_ax.clear()
+                im = self.weight_ax.imshow(
+                    data,
+                    extent=[X[0]*1e6, X[-1]*1e6, Y[0]*1e6, Y[-1]*1e6],
+                    origin='lower',
+                    cmap=cmap,
+                    aspect='auto'
+                )
+                self.weight_ax.set_xlabel('x [μm]')
+                self.weight_ax.set_ylabel('y [μm]')
+                self.weight_ax.set_title(title)
+    
+                # Colorbar - proper removal and recreation
+                if hasattr(self, 'weight_colorbar') and self.weight_colorbar is not None:
+                    try:
+                        self.weight_colorbar.remove()
+                    except Exception:
+                        pass
+                self.weight_colorbar = self.weight_fig.colorbar(im, ax=self.weight_ax)
+    
+                self.weight_canvas.draw()
+    
+            except Exception as e:
+                print(f"Plot update error: {e}")
+    
+        # ========== Diagnostics タブ ==========
+    
+        def _build_diagnostics_tab(self):
+            """Diagnosticsタブの構築"""
+            tab_frame = self.tab_diagnostics
+            tab_frame.columnconfigure(0, weight=1)
+            tab_frame.rowconfigure(1, weight=1)
+    
+            # 上部：ボタン
+            button_frame = ttk.Frame(tab_frame)
+            button_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+    
+            ttk.Button(
+                button_frame,
+                text="Run Diagnostics",
+                command=self.run_diagnostics
+            ).pack(side=tk.LEFT, padx=5)
+    
+            # 下部：結果表示
+            result_frame = ttk.LabelFrame(tab_frame, text="Diagnostic Results", padding="10")
+            result_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+            result_frame.columnconfigure(0, weight=1)
+            result_frame.rowconfigure(0, weight=1)
+    
+            self.diag_text = scrolledtext.ScrolledText(
+                result_frame,
+                wrap=tk.WORD,
+                width=100,
+                height=30,
+                font=("Courier", 9)
+            )
+            self.diag_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    
+        def run_diagnostics(self):
+            """診断を実行"""
+            if self.weight_data is None:
+                messagebox.showwarning("Warning", "No weighting data loaded. Go to 'Weighting Potential' tab and load data first.")
+                return
+    
+            self.diag_text.delete(1.0, tk.END)
+            self.diag_text.insert(tk.END, "="*70 + "\n")
+            self.diag_text.insert(tk.END, "Weighting Potential Diagnostics\n")
+            self.diag_text.insert(tk.END, "="*70 + "\n\n")
+    
+            try:
+                phi_w = self.weight_data['phi_w']
+                X = self.weight_data['X']
+                Y = self.weight_data['Y']
+                Z = self.weight_data['Z']
+    
+                # 電極マスク作成（再利用）
+                # field_pathから電位Vを読み込み
+                field_data = np.load(self.field_path)
+                V = field_data['V']
+    
+                collect_mask, ground_mask, k_surface = create_electrode_masks(V, Z)
+    
+                # 1. 電極境界条件チェック
+                self.diag_text.insert(tk.END, "[Electrode boundary check]\n")
+    
+                # Collect electrode
+                phi_collect = phi_w[collect_mask]
+                if len(phi_collect) > 0:
+                    mean_c = phi_collect.mean()
+                    min_c = phi_collect.min()
+                    max_c = phi_collect.max()
+                    max_dev_c = max(abs(1.0 - min_c), abs(max_c - 1.0))
+    
+                    self.diag_text.insert(tk.END, f"  Collect electrode (φ_w ≈ 1):\n")
+                    self.diag_text.insert(tk.END, f"    mean={mean_c:.6f}, min={min_c:.6f}, max={max_c:.6f}\n")
+                    self.diag_text.insert(tk.END, f"    max|Δ|={max_dev_c:.6f}\n")
+    
+                    tol = 1e-2
+                    if max_dev_c < tol:
+                        self.diag_text.insert(tk.END, f"    → OK (max|Δ| < tol={tol})\n")
+                    else:
+                        self.diag_text.insert(tk.END, f"    → WARNING: exceeds tol={tol}\n")
+    
+                # Ground electrode
+                phi_ground = phi_w[ground_mask]
+                if len(phi_ground) > 0:
+                    mean_g = phi_ground.mean()
+                    min_g = phi_ground.min()
+                    max_g = phi_ground.max()
+                    max_dev_g = max(abs(min_g), abs(max_g))
+    
+                    self.diag_text.insert(tk.END, f"\n  Ground electrode (φ_w ≈ 0):\n")
+                    self.diag_text.insert(tk.END, f"    mean={mean_g:.6f}, min={min_g:.6f}, max={max_g:.6f}\n")
+                    self.diag_text.insert(tk.END, f"    max|Δ|={max_dev_g:.6f}\n")
+    
+                    if max_dev_g < tol:
+                        self.diag_text.insert(tk.END, f"    → OK (max|Δ| < tol={tol})\n")
+                    else:
+                        self.diag_text.insert(tk.END, f"    → WARNING: exceeds tol={tol}\n")
+    
+                # 2. Laplacian residual
+                self.diag_text.insert(tk.END, f"\n[Laplacian residual (∇²φ_w ≈ 0)]\n")
+    
+                nz, ny, nx = phi_w.shape
+                dx = X[1] - X[0] if len(X) > 1 else 1e-6
+                dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
+                dz = Z[1] - Z[0] if len(Z) > 1 else 1e-6
+    
+                # 内部セルのみ
+                fixed = collect_mask | ground_mask
+                residuals = []
+    
+                for k in range(1, nz-1):
+                    for j in range(1, ny-1):
+                        for i in range(1, nx-1):
+                            if fixed[k, j, i]:
+                                continue
+    
+                            lap = (
+                                (phi_w[k, j, i+1] + phi_w[k, j, i-1] - 2*phi_w[k, j, i]) / dx**2 +
+                                (phi_w[k, j+1, i] + phi_w[k, j-1, i] - 2*phi_w[k, j, i]) / dy**2 +
+                                (phi_w[k+1, j, i] + phi_w[k-1, j, i] - 2*phi_w[k, j, i]) / dz**2
+                            )
+                            residuals.append(abs(lap))
+    
+                if residuals:
+                    residuals = np.array(residuals)
+                    rms = np.sqrt((residuals**2).mean())
+                    max_res = residuals.max()
+    
+                    self.diag_text.insert(tk.END, f"  RMS = {rms:.3e}\n")
+                    self.diag_text.insert(tk.END, f"  Max = {max_res:.3e}\n")
+    
+                    if rms < 1e-4 and max_res < 1e-3:
+                        self.diag_text.insert(tk.END, f"  → OK (RMS < 1e-4, Max < 1e-3)\n")
+                    else:
+                        self.diag_text.insert(tk.END, f"  → WARNING: residuals are relatively large\n")
+    
+                # 3. |E_w| 統計
+                self.diag_text.insert(tk.END, f"\n[|E_w| statistics]\n")
+    
                 E_wx = self.weight_data['E_wx']
                 E_wy = self.weight_data['E_wy']
                 E_wz = self.weight_data['E_wz']
-                data = np.sqrt(E_wx[iz, :, :]**2 + E_wy[iz, :, :]**2 + E_wz[iz, :, :]**2)
-                title = f"|E_w| at z={Z[iz]*1e6:.2f} μm"
-                cmap = 'hot'
-
-            # プロット
-            self.weight_ax.clear()
-            im = self.weight_ax.imshow(
-                data,
-                extent=[X[0]*1e6, X[-1]*1e6, Y[0]*1e6, Y[-1]*1e6],
-                origin='lower',
-                cmap=cmap,
-                aspect='auto'
-            )
-            self.weight_ax.set_xlabel('x [μm]')
-            self.weight_ax.set_ylabel('y [μm]')
-            self.weight_ax.set_title(title)
-
-            # Colorbar
-            if hasattr(self, 'weight_colorbar'):
-                self.weight_colorbar.remove()
-            self.weight_colorbar = self.weight_fig.colorbar(im, ax=self.weight_ax)
-
-            self.weight_canvas.draw()
-
-        except Exception as e:
-            print(f"Plot update error: {e}")
-
-    # ========== Diagnostics タブ ==========
-
-    def _build_diagnostics_tab(self):
-        """Diagnosticsタブの構築"""
-        tab_frame = self.tab_diagnostics
-        tab_frame.columnconfigure(0, weight=1)
-        tab_frame.rowconfigure(1, weight=1)
-
-        # 上部：ボタン
-        button_frame = ttk.Frame(tab_frame)
-        button_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
-
-        ttk.Button(
-            button_frame,
-            text="Run Diagnostics",
-            command=self.run_diagnostics
-        ).pack(side=tk.LEFT, padx=5)
-
-        # 下部：結果表示
-        result_frame = ttk.LabelFrame(tab_frame, text="Diagnostic Results", padding="10")
-        result_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        result_frame.columnconfigure(0, weight=1)
-        result_frame.rowconfigure(0, weight=1)
-
-        self.diag_text = scrolledtext.ScrolledText(
-            result_frame,
-            wrap=tk.WORD,
-            width=100,
-            height=30,
-            font=("Courier", 9)
-        )
-        self.diag_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-    def run_diagnostics(self):
-        """診断を実行"""
-        if self.weight_data is None:
-            messagebox.showwarning("Warning", "No weighting data loaded. Go to 'Weighting Potential' tab and load data first.")
-            return
-
-        self.diag_text.delete(1.0, tk.END)
-        self.diag_text.insert(tk.END, "="*70 + "\n")
-        self.diag_text.insert(tk.END, "Weighting Potential Diagnostics\n")
-        self.diag_text.insert(tk.END, "="*70 + "\n\n")
-
-        try:
-            phi_w = self.weight_data['phi_w']
-            X = self.weight_data['X']
-            Y = self.weight_data['Y']
-            Z = self.weight_data['Z']
-
-            # 電極マスク作成（再利用）
-            # field_pathから電位Vを読み込み
-            field_data = np.load(self.field_path)
-            V = field_data['V']
-
-            collect_mask, ground_mask, k_surface = create_electrode_masks(V, Z)
-
-            # 1. 電極境界条件チェック
-            self.diag_text.insert(tk.END, "[Electrode boundary check]\n")
-
-            # Collect electrode
-            phi_collect = phi_w[collect_mask]
-            if len(phi_collect) > 0:
-                mean_c = phi_collect.mean()
-                min_c = phi_collect.min()
-                max_c = phi_collect.max()
-                max_dev_c = max(abs(1.0 - min_c), abs(max_c - 1.0))
-
-                self.diag_text.insert(tk.END, f"  Collect electrode (φ_w ≈ 1):\n")
-                self.diag_text.insert(tk.END, f"    mean={mean_c:.6f}, min={min_c:.6f}, max={max_c:.6f}\n")
-                self.diag_text.insert(tk.END, f"    max|Δ|={max_dev_c:.6f}\n")
-
-                tol = 1e-2
-                if max_dev_c < tol:
-                    self.diag_text.insert(tk.END, f"    → OK (max|Δ| < tol={tol})\n")
-                else:
-                    self.diag_text.insert(tk.END, f"    → WARNING: exceeds tol={tol}\n")
-
-            # Ground electrode
-            phi_ground = phi_w[ground_mask]
-            if len(phi_ground) > 0:
-                mean_g = phi_ground.mean()
-                min_g = phi_ground.min()
-                max_g = phi_ground.max()
-                max_dev_g = max(abs(min_g), abs(max_g))
-
-                self.diag_text.insert(tk.END, f"\n  Ground electrode (φ_w ≈ 0):\n")
-                self.diag_text.insert(tk.END, f"    mean={mean_g:.6f}, min={min_g:.6f}, max={max_g:.6f}\n")
-                self.diag_text.insert(tk.END, f"    max|Δ|={max_dev_g:.6f}\n")
-
-                if max_dev_g < tol:
-                    self.diag_text.insert(tk.END, f"    → OK (max|Δ| < tol={tol})\n")
-                else:
-                    self.diag_text.insert(tk.END, f"    → WARNING: exceeds tol={tol}\n")
-
-            # 2. Laplacian residual
-            self.diag_text.insert(tk.END, f"\n[Laplacian residual (∇²φ_w ≈ 0)]\n")
-
-            nz, ny, nx = phi_w.shape
-            dx = X[1] - X[0] if len(X) > 1 else 1e-6
-            dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
-            dz = Z[1] - Z[0] if len(Z) > 1 else 1e-6
-
-            # 内部セルのみ
-            fixed = collect_mask | ground_mask
-            residuals = []
-
-            for k in range(1, nz-1):
-                for j in range(1, ny-1):
-                    for i in range(1, nx-1):
-                        if fixed[k, j, i]:
-                            continue
-
-                        lap = (
-                            (phi_w[k, j, i+1] + phi_w[k, j, i-1] - 2*phi_w[k, j, i]) / dx**2 +
-                            (phi_w[k, j+1, i] + phi_w[k, j-1, i] - 2*phi_w[k, j, i]) / dy**2 +
-                            (phi_w[k+1, j, i] + phi_w[k-1, j, i] - 2*phi_w[k, j, i]) / dz**2
-                        )
-                        residuals.append(abs(lap))
-
-            if residuals:
-                residuals = np.array(residuals)
-                rms = np.sqrt((residuals**2).mean())
-                max_res = residuals.max()
-
-                self.diag_text.insert(tk.END, f"  RMS = {rms:.3e}\n")
-                self.diag_text.insert(tk.END, f"  Max = {max_res:.3e}\n")
-
-                if rms < 1e-4 and max_res < 1e-3:
-                    self.diag_text.insert(tk.END, f"  → OK (RMS < 1e-4, Max < 1e-3)\n")
-                else:
-                    self.diag_text.insert(tk.END, f"  → WARNING: residuals are relatively large\n")
-
-            # 3. |E_w| 統計
-            self.diag_text.insert(tk.END, f"\n[|E_w| statistics]\n")
-
-            E_wx = self.weight_data['E_wx']
-            E_wy = self.weight_data['E_wy']
-            E_wz = self.weight_data['E_wz']
-            E_mag = np.sqrt(E_wx**2 + E_wy**2 + E_wz**2)
-
-            # 表面付近（最後の層）
-            iz = len(Z) - 1
-            E_surface = E_mag[iz, :, :]
-
-            self.diag_text.insert(tk.END, f"  At z = {Z[iz]*1e6:.2f} μm (surface):\n")
-            self.diag_text.insert(tk.END, f"    min    = {E_surface.min():.3e} V/m\n")
-            self.diag_text.insert(tk.END, f"    median = {np.median(E_surface):.3e} V/m\n")
-            self.diag_text.insert(tk.END, f"    95%    = {np.percentile(E_surface, 95):.3e} V/m\n")
-            self.diag_text.insert(tk.END, f"    max    = {E_surface.max():.3e} V/m\n")
-
-            # Summary
-            self.diag_text.insert(tk.END, f"\n{'='*70}\n")
-            self.diag_text.insert(tk.END, "Summary:\n")
-            self.diag_text.insert(tk.END, "  - Electrode boundary conditions checked.\n")
-            self.diag_text.insert(tk.END, "  - Laplacian residual computed in bulk.\n")
-            self.diag_text.insert(tk.END, "  → See detailed results above.\n")
-            self.diag_text.insert(tk.END, "="*70 + "\n")
-
-        except Exception as e:
-            import traceback
-            self.diag_text.insert(tk.END, f"\nERROR:\n{traceback.format_exc()}\n")
+                E_mag = np.sqrt(E_wx**2 + E_wy**2 + E_wz**2)
+    
+                # 表面付近（最後の層）
+                iz = len(Z) - 1
+                E_surface = E_mag[iz, :, :]
+    
+                self.diag_text.insert(tk.END, f"  At z = {Z[iz]*1e6:.2f} μm (surface):\n")
+                self.diag_text.insert(tk.END, f"    min    = {E_surface.min():.3e} V/m\n")
+                self.diag_text.insert(tk.END, f"    median = {np.median(E_surface):.3e} V/m\n")
+                self.diag_text.insert(tk.END, f"    95%    = {np.percentile(E_surface, 95):.3e} V/m\n")
+                self.diag_text.insert(tk.END, f"    max    = {E_surface.max():.3e} V/m\n")
+    
+                # Summary
+                self.diag_text.insert(tk.END, f"\n{'='*70}\n")
+                self.diag_text.insert(tk.END, "Summary:\n")
+                self.diag_text.insert(tk.END, "  - Electrode boundary conditions checked.\n")
+                self.diag_text.insert(tk.END, "  - Laplacian residual computed in bulk.\n")
+                self.diag_text.insert(tk.END, "  → See detailed results above.\n")
+                self.diag_text.insert(tk.END, "="*70 + "\n")
+    
+            except Exception as e:
+                import traceback
+                self.diag_text.insert(tk.END, f"\nERROR:\n{traceback.format_exc()}\n")
 
 
 def main_gui():
