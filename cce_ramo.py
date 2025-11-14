@@ -1628,13 +1628,15 @@ class CCESimulationGUI(tk.Tk):
         self.weight_canvas = FigureCanvasTkAgg(self.weight_fig, master=plot_frame)
         self.weight_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        # Toolbar
-        toolbar = NavigationToolbar2Tk(self.weight_canvas, plot_frame)
+        # Toolbar (separate frame to avoid pack/grid conflict)
+        toolbar_frame = ttk.Frame(plot_frame)
+        toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        toolbar = NavigationToolbar2Tk(self.weight_canvas, toolbar_frame)
         toolbar.update()
 
         # Status label
         self.weight_status = ttk.Label(plot_frame, text="No data loaded", foreground="gray")
-        self.weight_status.grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.weight_status.grid(row=2, column=0, sticky=tk.W, pady=2)
 
     def load_weighting_data(self):
         """ウェイティングデータを読み込み"""
