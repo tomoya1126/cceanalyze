@@ -2734,6 +2734,32 @@ if TKINTER_AVAILABLE:
             )
             detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
             row += 1
+
+            # Field File Selection
+            ttk.Label(control_frame, text="Field file:").grid(row=row, column=0, sticky=tk.W, pady=2)
+
+            # 利用可能な電界ファイルを探索
+            field_dir = "電界"
+            available_fields = []
+            if os.path.exists(field_dir):
+                for f in os.listdir(field_dir):
+                    if f.endswith(".npz"):
+                        available_fields.append(f)
+
+            # デフォルト値の設定
+            default_field = "Auto (from detector type)"
+            field_values = [default_field] + sorted(available_fields)
+
+            self.weight_field_file_var = tk.StringVar(value=default_field)
+            field_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.weight_field_file_var,
+                values=field_values,
+                state="readonly",
+                width=15
+            )
+            field_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
     
             # Full-thickness option
             self.use_fullthick_var = tk.BooleanVar(value=True)
@@ -2851,7 +2877,9 @@ if TKINTER_AVAILABLE:
                 self.weight_status.config(text="Loading...", foreground="blue")
                 self.update()
 
-                # パスを決定
+                # Field file パスを決定
+                field_file_str = self.weight_field_file_var.get()
+
                 # 電界ディレクトリを探す（Windowsパスまたはローカルパス）
                 possible_dirs = [
                     r"C:\Users\discu\デスクトップ\python\cce\電界",
@@ -2867,12 +2895,17 @@ if TKINTER_AVAILABLE:
                 if base_dir is None:
                     raise FileNotFoundError("電界 directory not found")
 
-                if detector_type == "yoko":
-                    self.field_path = os.path.join(base_dir, "yokogata_field.npz")
-                elif detector_type == "kushi":
-                    self.field_path = os.path.join(base_dir, "kushigata_field.npz")
+                if field_file_str == "Auto (from detector type)":
+                    # Auto: detector_type から決定
+                    if detector_type == "yoko":
+                        self.field_path = os.path.join(base_dir, "yokogata_field.npz")
+                    elif detector_type == "kushi":
+                        self.field_path = os.path.join(base_dir, "kushigata_field.npz")
+                    else:
+                        raise ValueError(f"Unknown detector type: {detector_type}")
                 else:
-                    raise ValueError(f"Unknown detector type: {detector_type}")
+                    # 明示的に指定されたファイル
+                    self.field_path = os.path.join(base_dir, field_file_str)
 
                 # 全厚モードか通常モードか
                 if use_fullthick:
