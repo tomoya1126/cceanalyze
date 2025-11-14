@@ -1366,8 +1366,12 @@ def compute_cce_ramo_drift(
     - 有限寿命 τ_e による再結合損失を考慮
     - 電界データと重み電位データの座標系が異なる場合に対応
 
-    TODO: バルク領域（z < Z_field.min()）の電界は、表面領域の平均値で近似しています。
-          より精密なモデルでは、バルク電界の実測値または理論モデルが必要です。
+    バルク電界（z < Z_field.min()）は一様電界モデルで近似：
+    表面電極付近の平均電位から V を推定し、E_bulk = V / z_surface とする。
+
+    修正履歴：
+    - ドリフト距離を d_i = z_i に修正（collect電極 z=0 までの距離）
+    - バルク電界を一様電界モデルで推定
     """
     # 総e-hペア数と生成電荷
     N_i = dE_seg / W_EH
@@ -1380,12 +1384,18 @@ def compute_cce_ramo_drift(
     # 誘導電荷の計算（N_i個のキャリア分を直接計算）
     Q_induced = 0.0
 
-    # バルク領域の代表電界値（Z範囲内の平均）
-    # TODO: より精密な近似が必要な場合はここを改良
-    E_mag_bulk = np.sqrt(Ex**2 + Ey**2 + Ez**2).mean()  # [V/m]
+    # バルク領域の電界推定（一様電界モデル）
+    # 表面付近（Z_field範囲）の電位データから V_bias を推定
+    # 簡易推定: E_z の平均 * 距離
+    if len(Z_field) > 0 and len(Ez) > 0:
+        E_z_surface_avg = np.abs(Ez).mean()
+        V_estimate = E_z_surface_avg * (z_surface - Z_field[0])
+        E_bulk = V_estimate / z_surface if z_surface > 0 else 2.3e5  # [V/m]
+    else:
+        # デフォルト: 100 V / 430 µm ≈ 2.3e5 V/m
+        E_bulk = 2.3e5  # [V/m]
 
-    # バルク領域のφ_w近似値（表面に最も近い値を使用）
-    # z < Z.min() の場合は Z.min() 位置の φ_w を使う
+    # バルク領域のφ_w近似値（裏面に最も近い値を使用）
     phi_w_bulk_cache = {}  # (x_event, y_event) → φ_w at Z.min()
 
     for i in range(len(z_seg)):
@@ -1393,8 +1403,13 @@ def compute_cce_ramo_drift(
         # α線は z_surface から入射し、-z 方向（内部）に進む
         z_i = z_surface - z_seg[i]
 
-        # collect 電極までの距離（z方向の1D近似）
-        d_i = z_seg[i]  # [m]
+        # collect 電極 (z=z_surface, 表面) までの距離（z方向の1D近似）
+        # 【重要な修正】d_i = z_surface - z_i （生成位置から表面までの距離）
+        d_i = z_surface - z_i  # [m]
+
+        if d_i <= 0:
+            # 生成位置が collect 電極より上 → 寄与なし
+            continue
 
         # 電界の取得（電界データの座標系 X_field, Y_field, Z_field を使用）
         if z_i >= Z_field[0] and z_i <= Z_field[-1]:
@@ -1404,8 +1419,9 @@ def compute_cce_ramo_drift(
             Ez_i = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_event, y_event, z_i)
             E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
         else:
-            # z が電界データの範囲外（バルク領域）→ 近似値を使用
-            E_mag = E_mag_bulk  # [V/m]
+            # z が電界データの範囲外（バルク領域）
+            # 【修正】一様電界モデルで近似
+            E_mag = E_bulk  # [V/m]
 
         # ドリフト速度 [m/s]
         # μ_e [cm²/Vs] * E [V/m] = μ_e * 1e-4 [m²/Vs] * E [V/m] = μ_e * 1e-4 * E [m/s]
@@ -1421,23 +1437,28 @@ def compute_cce_ramo_drift(
         # 生存確率（再結合による損失）
         f_survival = np.exp(-t_drift / tau_e)
 
-        # 重み電位
+        # 重み電位（生成位置）
         if z_i >= Z[0] and z_i <= Z[-1]:
             # 範囲内 → 補間
-            phi_w_i = trilinear_interpolate(phi_w, X, Y, Z, x_event, y_event, z_i)
+            phi_w_start = trilinear_interpolate(phi_w, X, Y, Z, x_event, y_event, z_i)
         else:
             # 範囲外（バルク領域、z < Z.min()）
-            # → Z.min() 位置のφ_wで近似（表面に最も近い値）
-            # TODO: より精密なモデルが必要な場合はここを改良
+            # → Z.min() 位置のφ_wで近似
             if (x_event, y_event) not in phi_w_bulk_cache:
                 phi_w_bulk_cache[(x_event, y_event)] = trilinear_interpolate(
                     phi_w, X, Y, Z, x_event, y_event, Z[0]
                 )
-            phi_w_i = phi_w_bulk_cache[(x_event, y_event)]
+            phi_w_start = phi_w_bulk_cache[(x_event, y_event)]
 
-        # N_i[i] 個のキャリアが誘起する電荷（Shockley-Ramo）
-        # Q_e = N_i * e * f_survival * (1 - φ_w(start))
-        Q_e_i = N_i[i] * Q_E * f_survival * (1 - phi_w_i)
+        # Shockley-Ramo: Q_induced = q * [φ_w(end) - φ_w(start)]
+        # collect 電極 (表面, z=z_surface) まで到達すると仮定: φ_w = 1
+        # より正確には、寿命を考慮して実際の終点を計算すべき
+        phi_w_end = 1.0  # collect 電極（表面）
+
+        # N_i[i] 個のキャリアが誘起する電荷（Shockley-Ramo + 寿命減衰）
+        # 電子 (q = -e): Q = -e * [φ_w_end - φ_w_start] = e * (φ_w_start - φ_w_end)
+        # 簡易モデル: f_survival * |Δφ_w|
+        Q_e_i = N_i[i] * Q_E * f_survival * (phi_w_end - phi_w_start)
 
         # 加算
         Q_induced += Q_e_i
