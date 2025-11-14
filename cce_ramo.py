@@ -2199,22 +2199,19 @@ if TKINTER_AVAILABLE:
             )
             row += 1
     
-            # Z slice slider
-            ttk.Label(control_frame, text="Z Slice:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            # Z slice selection (Combobox instead of slider)
+            ttk.Label(control_frame, text="Z Slice [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
             row += 1
-    
-            self.z_slider = ttk.Scale(
+
+            self.z_combo_var = tk.StringVar()
+            self.z_combo = ttk.Combobox(
                 control_frame,
-                from_=0,
-                to=10,
-                orient=tk.HORIZONTAL,
-                command=self.update_weighting_plot
+                textvariable=self.z_combo_var,
+                state="readonly",
+                width=25
             )
-            self.z_slider.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
-            row += 1
-    
-            self.z_label = ttk.Label(control_frame, text="z = ??? μm")
-            self.z_label.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            self.z_combo.bind("<<ComboboxSelected>>", self.update_weighting_plot)
+            self.z_combo.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
             row += 1
     
             # Display type
@@ -2368,11 +2365,12 @@ if TKINTER_AVAILABLE:
                     'E_wz': E_wz,
                 }
     
-                # Z sliderを更新
+                # Z Comboboxを更新
                 nz = len(Z)
-                self.z_slider.configure(from_=0, to=nz-1)
-                self.z_slider.set(nz-1)  # デフォルトは表面
-    
+                z_values = [f"{Z[k]*1e6:.2f}" for k in range(nz)]
+                self.z_combo['values'] = z_values
+                self.z_combo.current(nz-1)  # デフォルトは表面
+
                 self.weight_status.config(text=f"Loaded: {detector_type}, Grid: {len(X)}x{len(Y)}x{len(Z)}", foreground="green")
                 self.update_weighting_plot()
     
@@ -2387,19 +2385,21 @@ if TKINTER_AVAILABLE:
             """ウェイティングプロットを更新"""
             if self.weight_data is None:
                 return
-    
+
             try:
-                iz = int(self.z_slider.get())
+                # Comboboxから選択されたインデックスを取得
+                selected = self.z_combo.current()
+                if selected < 0:
+                    return  # 何も選択されていない
+
+                iz = selected
                 display_type = self.display_var.get()
-    
+
                 phi_w = self.weight_data['phi_w']
                 X = self.weight_data['X']
                 Y = self.weight_data['Y']
                 Z = self.weight_data['Z']
-    
-                # Z label更新
-                self.z_label.config(text=f"z = {Z[iz]*1e6:.2f} μm")
-    
+
                 # データ取得
                 if display_type == "phi_w":
                     data = phi_w[iz, :, :]
@@ -2412,7 +2412,7 @@ if TKINTER_AVAILABLE:
                     data = np.sqrt(E_wx[iz, :, :]**2 + E_wy[iz, :, :]**2 + E_wz[iz, :, :]**2)
                     title = f"|E_w| at z={Z[iz]*1e6:.2f} μm"
                     cmap = 'hot'
-    
+
                 # プロット
                 self.weight_ax.clear()
                 im = self.weight_ax.imshow(
@@ -2425,17 +2425,18 @@ if TKINTER_AVAILABLE:
                 self.weight_ax.set_xlabel('x [μm]')
                 self.weight_ax.set_ylabel('y [μm]')
                 self.weight_ax.set_title(title)
-    
-                # Colorbar - proper removal and recreation
+
+                # Colorbarの更新（図が小さくなる問題を修正）
+                # 既存のcolorbarがあれば更新、なければ新規作成
                 if hasattr(self, 'weight_colorbar') and self.weight_colorbar is not None:
-                    try:
-                        self.weight_colorbar.remove()
-                    except Exception:
-                        pass
-                self.weight_colorbar = self.weight_fig.colorbar(im, ax=self.weight_ax)
-    
+                    # 既存のcolorbarを更新（axesサイズを維持）
+                    self.weight_colorbar.update_normal(im)
+                else:
+                    # 新規作成
+                    self.weight_colorbar = self.weight_fig.colorbar(im, ax=self.weight_ax)
+
                 self.weight_canvas.draw()
-    
+
             except Exception as e:
                 print(f"Plot update error: {e}")
 
