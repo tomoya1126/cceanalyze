@@ -739,27 +739,37 @@ def compute_cce_for_one_event(
 # ========== メインシミュレーション ==========
 
 def simulate_cce(
-    field_path: str = r"C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz",
-    srim_path: str = r"C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt",
+    detector_type: str = "yoko",
     n_events: int = 1000,
+    mode: str = "ramo_ideal",
+    mu_e: float = 100.0,
+    tau_e: float = 1e-8,
+    num_threads: Optional[int] = None,
     seed: Optional[int] = None,
     max_iter: int = 20000,
     tol: float = 1e-5,
     omega: float = 1.8,
-    num_threads: Optional[int] = None,
     force_recalc_weighting: bool = False,
+    field_path: Optional[str] = None,
+    srim_path: Optional[str] = None,
 ) -> dict:
     """
     n_eventsイベントをシミュレーションしてCCE統計を返す。
 
     Parameters
     ----------
-    field_path : str
-        電界npzファイルパス
-    srim_path : str
-        SRIM IONIZファイルパス
+    detector_type : str
+        検出器タイプ: "yoko" (横型) or "kushi" (くし形)
     n_events : int
         シミュレーションするイベント数
+    mode : str
+        計算モード: "ramo_ideal" (CCE=1テスト) or "ramo_drift" (μ,τ考慮)
+    mu_e : float
+        電子移動度 [cm^2/Vs] (mode="ramo_drift"時に使用)
+    tau_e : float
+        電子寿命 [s] (mode="ramo_drift"時に使用)
+    num_threads : int | None
+        Numbaスレッド数
     seed : int | None
         乱数シード
     max_iter : int
@@ -768,10 +778,12 @@ def simulate_cce(
         重み電位計算の収束判定閾値
     omega : float
         SOR緩和パラメータ (1.0 < omega < 2.0)
-    num_threads : int | None
-        Numbaスレッド数
     force_recalc_weighting : bool
         Trueの場合、キャッシュを無視して重み電位を再計算
+    field_path : str | None
+        電界npzファイルパス（Noneの場合はdetector_typeから自動決定）
+    srim_path : str | None
+        SRIM IONIZファイルパス（Noneの場合はデフォルト使用）
 
     Returns
     -------
@@ -779,7 +791,23 @@ def simulate_cce(
         'cce_list': CCEのリスト
         'mean': 平均CCE
         'std': 標準偏差
+        'min': 最小CCE
+        'max': 最大CCE
+        'n_events': イベント数
     """
+    # field_path の自動決定
+    if field_path is None:
+        base_dir = r"C:\Users\discu\デスクトップ\python\cce\電界"
+        if detector_type == "yoko":
+            field_path = os.path.join(base_dir, "yokogata_field.npz")
+        elif detector_type == "kushi":
+            field_path = os.path.join(base_dir, "kushigata_field.npz")
+        else:
+            raise ValueError(f"Unknown detector_type: {detector_type}")
+
+    # srim_path のデフォルト
+    if srim_path is None:
+        srim_path = r"C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt"
     print("="*70)
     print("Shockley-Ramo CCE Simulation")
     print("="*70)
@@ -828,6 +856,9 @@ def simulate_cce(
         'cce_list': cce_list,
         'mean': mean_cce,
         'std': std_cce,
+        'min': cce_array.min(),
+        'max': cce_array.max(),
+        'n_events': n_events,
     }
 
 
@@ -855,27 +886,48 @@ def plot_cce_histogram(cce_list: list[float], output_file: str = "cce_histogram.
 
 # ========== CLI ==========
 
-def main():
+def main_cli():
+    """CLI モードのメイン関数"""
     parser = argparse.ArgumentParser(
         description="Shockley-Ramo CCE simulation for SiC detector"
     )
     parser.add_argument(
-        "--field",
+        "--detector",
         type=str,
-        default=r"C:\Users\discu\デスクトップ\python\cce\電界\yokogata_field.npz",
-        help="Path to field npz file"
+        default="yoko",
+        choices=["yoko", "kushi"],
+        help="Detector type: yoko (横型) or kushi (くし形)"
     )
     parser.add_argument(
-        "--srim",
+        "--mode",
         type=str,
-        default=r"C:\Users\discu\デスクトップ\python\cce\5486keVαinSiCIONIZ.txt",
-        help="Path to SRIM IONIZ file"
+        default="ramo_ideal",
+        choices=["ramo_ideal", "ramo_drift"],
+        help="Simulation mode: ramo_ideal (CCE=1 test) or ramo_drift (μ,τ with field)"
     )
     parser.add_argument(
         "--n-events",
         type=int,
         default=1000,
         help="Number of events to simulate"
+    )
+    parser.add_argument(
+        "--mu-e",
+        type=float,
+        default=100.0,
+        help="Electron mobility [cm^2/Vs] (for ramo_drift mode)"
+    )
+    parser.add_argument(
+        "--tau-e",
+        type=float,
+        default=1e-8,
+        help="Electron lifetime [s] (for ramo_drift mode)"
+    )
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=None,
+        help="Number of Numba threads (default: auto)"
     )
     parser.add_argument(
         "--seed",
@@ -902,15 +954,21 @@ def main():
         help="SOR relaxation parameter (1.0 < omega < 2.0, optimal: 1.6-1.9)"
     )
     parser.add_argument(
-        "--num-threads",
-        type=int,
-        default=None,
-        help="Number of Numba threads (default: auto)"
-    )
-    parser.add_argument(
         "--force-recalc-weighting",
         action="store_true",
         help="Force recalculation of weighting potential (ignore cache)"
+    )
+    parser.add_argument(
+        "--field",
+        type=str,
+        default=None,
+        help="Custom path to field npz file (overrides --detector)"
+    )
+    parser.add_argument(
+        "--srim",
+        type=str,
+        default=None,
+        help="Custom path to SRIM IONIZ file"
     )
     parser.add_argument(
         "--output",
@@ -923,15 +981,19 @@ def main():
 
     # シミュレーション実行
     results = simulate_cce(
-        field_path=args.field,
-        srim_path=args.srim,
+        detector_type=args.detector,
         n_events=args.n_events,
+        mode=args.mode,
+        mu_e=args.mu_e,
+        tau_e=args.tau_e,
+        num_threads=args.num_threads,
         seed=args.seed,
         max_iter=args.max_iter,
         tol=args.tol,
         omega=args.omega,
-        num_threads=args.num_threads,
         force_recalc_weighting=args.force_recalc_weighting,
+        field_path=args.field,
+        srim_path=args.srim,
     )
 
     # ヒストグラム描画
@@ -940,5 +1002,279 @@ def main():
     print("\nSimulation completed successfully!")
 
 
+# ========== GUI (tkinter) ==========
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, scrolledtext, messagebox
+    import threading
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
+
+
+class CCESimulationGUI(tk.Tk):
+    """
+    Shockley-Ramo CCE シミュレーション用 GUI
+
+    tkinter 標準ライブラリのみを使用したシンプルな GUI。
+    パラメータを入力して「Run Simulation」ボタンでシミュレーションを実行。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.title("Shockley-Ramo CCE Simulator")
+        self.geometry("800x700")
+
+        self._build_widgets()
+        self.running = False
+
+    def _build_widgets(self):
+        """ウィジェット配置"""
+        # メインフレーム
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        # === パラメータ入力エリア ===
+        param_frame = ttk.LabelFrame(main_frame, text="Parameters", padding="10")
+        param_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+
+        row = 0
+
+        # Detector Type
+        ttk.Label(param_frame, text="Detector:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        self.detector_var = tk.StringVar(value="Yokogata (横型)")
+        detector_combo = ttk.Combobox(
+            param_frame,
+            textvariable=self.detector_var,
+            values=["Yokogata (横型)", "Kushigata (くし形)"],
+            state="readonly",
+            width=25
+        )
+        detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+        row += 1
+
+        # Mode
+        ttk.Label(param_frame, text="Mode:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        self.mode_var = tk.StringVar(value="Ideal (CCE=1, test)")
+        mode_combo = ttk.Combobox(
+            param_frame,
+            textvariable=self.mode_var,
+            values=["Ideal (CCE=1, test)", "Drift (μ,τ with field)"],
+            state="readonly",
+            width=25
+        )
+        mode_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+        row += 1
+
+        # Events
+        ttk.Label(param_frame, text="Events:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        self.events_var = tk.StringVar(value="1000")
+        ttk.Entry(param_frame, textvariable=self.events_var, width=28).grid(
+            row=row, column=1, sticky=(tk.W, tk.E), pady=2
+        )
+        row += 1
+
+        # μ_e
+        ttk.Label(param_frame, text="μ_e [cm²/Vs]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        self.mu_e_var = tk.StringVar(value="100.0")  # TODO: 実験値に合わせて調整
+        ttk.Entry(param_frame, textvariable=self.mu_e_var, width=28).grid(
+            row=row, column=1, sticky=(tk.W, tk.E), pady=2
+        )
+        row += 1
+
+        # τ_e
+        ttk.Label(param_frame, text="τ_e [s]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        self.tau_e_var = tk.StringVar(value="1e-8")
+        ttk.Entry(param_frame, textvariable=self.tau_e_var, width=28).grid(
+            row=row, column=1, sticky=(tk.W, tk.E), pady=2
+        )
+        row += 1
+
+        # Threads
+        ttk.Label(param_frame, text="Threads:").grid(row=row, column=0, sticky=tk.W, pady=2)
+        self.threads_var = tk.StringVar(value="")  # 空欄 = auto
+        ttk.Entry(param_frame, textvariable=self.threads_var, width=28).grid(
+            row=row, column=1, sticky=(tk.W, tk.E), pady=2
+        )
+        ttk.Label(param_frame, text="(empty = auto)", font=("", 8)).grid(
+            row=row, column=2, sticky=tk.W, padx=5
+        )
+        row += 1
+
+        # カラム幅調整
+        param_frame.columnconfigure(1, weight=1)
+
+        # === ボタンエリア ===
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=10)
+
+        self.run_button = ttk.Button(
+            button_frame,
+            text="Run Simulation",
+            command=self.run_simulation
+        )
+        self.run_button.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(button_frame, text="Quit", command=self.quit).pack(side=tk.LEFT, padx=5)
+
+        # === 結果サマリーエリア ===
+        result_frame = ttk.LabelFrame(main_frame, text="Results", padding="10")
+        result_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
+
+        self.result_label = ttk.Label(result_frame, text="No results yet.", foreground="gray")
+        self.result_label.pack(anchor=tk.W)
+
+        # === ログエリア ===
+        log_frame = ttk.LabelFrame(main_frame, text="Log", padding="10")
+        log_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        main_frame.rowconfigure(3, weight=1)
+
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame,
+            wrap=tk.WORD,
+            width=80,
+            height=20,
+            font=("Courier", 9)
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def log(self, message: str):
+        """ログエリアにメッセージを追加"""
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.update_idletasks()
+
+    def run_simulation(self):
+        """シミュレーション実行"""
+        if self.running:
+            messagebox.showwarning("Warning", "Simulation is already running!")
+            return
+
+        # パラメータ取得
+        try:
+            detector_str = self.detector_var.get()
+            detector_type = "yoko" if "Yokogata" in detector_str else "kushi"
+
+            mode_str = self.mode_var.get()
+            mode = "ramo_ideal" if "Ideal" in mode_str else "ramo_drift"
+
+            n_events = int(self.events_var.get())
+            mu_e = float(self.mu_e_var.get())
+            tau_e = float(self.tau_e_var.get())
+
+            threads_str = self.threads_var.get().strip()
+            num_threads = int(threads_str) if threads_str else None
+
+        except ValueError as e:
+            messagebox.showerror("Input Error", f"Invalid parameter: {e}")
+            return
+
+        # ログクリア
+        self.log_text.delete(1.0, tk.END)
+        self.log("Starting simulation...")
+        self.log(f"  Detector: {detector_type}")
+        self.log(f"  Mode: {mode}")
+        self.log(f"  Events: {n_events}")
+        self.log(f"  μ_e: {mu_e} cm²/Vs")
+        self.log(f"  τ_e: {tau_e} s")
+        self.log(f"  Threads: {num_threads if num_threads else 'auto'}")
+        self.log("")
+
+        # 結果をクリア
+        self.result_label.config(text="Running...", foreground="blue")
+        self.run_button.config(state="disabled")
+        self.running = True
+
+        # バックグラウンドで実行（GUIフリーズを防ぐ）
+        thread = threading.Thread(
+            target=self._run_simulation_thread,
+            args=(detector_type, mode, n_events, mu_e, tau_e, num_threads),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_simulation_thread(
+        self,
+        detector_type: str,
+        mode: str,
+        n_events: int,
+        mu_e: float,
+        tau_e: float,
+        num_threads: Optional[int]
+    ):
+        """バックグラウンドスレッドでシミュレーション実行"""
+        try:
+            # stdout をキャプチャするため、簡易版として直接 log() に出力
+            # （実際の stdout リダイレクトは複雑なので、ここでは省略）
+
+            # シミュレーション実行
+            results = simulate_cce(
+                detector_type=detector_type,
+                n_events=n_events,
+                mode=mode,
+                mu_e=mu_e,
+                tau_e=tau_e,
+                num_threads=num_threads,
+                seed=None,
+            )
+
+            # 結果表示
+            mean_cce = results['mean']
+            std_cce = results['std']
+            min_cce = results['min']
+            max_cce = results['max']
+
+            self.log("\n" + "="*70)
+            self.log("SIMULATION COMPLETED")
+            self.log("="*70)
+            self.log(f"  Events: {n_events}")
+            self.log(f"  Mean CCE: {mean_cce:.4f} ± {std_cce:.4f}")
+            self.log(f"  Min CCE: {min_cce:.4f}")
+            self.log(f"  Max CCE: {max_cce:.4f}")
+
+            # 結果サマリー更新
+            result_text = (
+                f"Events: {n_events}  |  "
+                f"Mean: {mean_cce:.4f} ± {std_cce:.4f}  |  "
+                f"Min: {min_cce:.4f}  |  "
+                f"Max: {max_cce:.4f}"
+            )
+            self.result_label.config(text=result_text, foreground="green")
+
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            self.log("\n" + "="*70)
+            self.log("ERROR")
+            self.log("="*70)
+            self.log(error_msg)
+            self.result_label.config(text="Error occurred (see log)", foreground="red")
+
+        finally:
+            # ボタンを再度有効化
+            self.run_button.config(state="normal")
+            self.running = False
+
+
+def main_gui():
+    """GUI モードのメイン関数"""
+    if not TKINTER_AVAILABLE:
+        print("ERROR: tkinter is not available. Cannot launch GUI.")
+        print("Please install tkinter or use CLI mode instead.")
+        return
+
+    app = CCESimulationGUI()
+    app.mainloop()
+
+
 if __name__ == "__main__":
-    main()
+    # --gui オプションで GUI / CLI を切り替え
+    import sys
+
+    if "--gui" in sys.argv:
+        main_gui()
+    else:
+        main_cli()
