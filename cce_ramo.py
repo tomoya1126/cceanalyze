@@ -21,6 +21,8 @@ import argparse
 import os
 from typing import Optional
 import hashlib
+import json
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -1697,6 +1699,120 @@ def plot_cce_histogram(cce_list: list[float], output_file: str = "cce_histogram.
     print(f"\nSaved histogram: {output_file}")
 
 
+# ========== 結果保存 ==========
+
+def create_results_directory(base_dir: str = "results") -> str:
+    """
+    タイムスタンプ付き結果保存ディレクトリを作成。
+
+    Parameters
+    ----------
+    base_dir : str
+        ベースディレクトリ名（デフォルト: "results"）
+
+    Returns
+    -------
+    str
+        作成されたディレクトリパス（例: "results/20250114_153045"）
+    """
+    # タイムスタンプ生成（例: 20250114_153045）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ディレクトリパス作成
+    result_dir = os.path.join(base_dir, timestamp)
+
+    # ディレクトリ作成（親ディレクトリも含む）
+    os.makedirs(result_dir, exist_ok=True)
+
+    return result_dir
+
+
+def save_simulation_results(
+    results: dict,
+    params: dict,
+    output_dir: Optional[str] = None,
+) -> str:
+    """
+    シミュレーション結果を保存。
+
+    Parameters
+    ----------
+    results : dict
+        simulate_cce()の返り値
+        - 'cce_list': CCE値のリスト
+        - 'mean', 'std', 'min', 'max': 統計値
+        - 'n_events': イベント数
+        - 'stopped': 停止フラグ
+    params : dict
+        入力パラメータ辞書
+        - 'detector_type': 検出器タイプ
+        - 'n_events': イベント数
+        - 'mode': シミュレーションモード
+        - 'alpha_MeV': α線エネルギー
+        - 'mu_e': 電子移動度
+        - 'tau_e': 電子寿命
+        - 'use_fullthick': 全厚weighting potential使用フラグ
+        - その他
+    output_dir : str | None
+        出力先ディレクトリ（Noneの場合は自動生成）
+
+    Returns
+    -------
+    str
+        保存先ディレクトリパス
+    """
+    # 出力ディレクトリ作成
+    if output_dir is None:
+        output_dir = create_results_directory()
+    else:
+        os.makedirs(output_dir, exist_ok=True)
+
+    # 1. パラメータをJSONで保存
+    params_file = os.path.join(output_dir, "params.json")
+    # 保存用にparamsとresultsの統計値を結合
+    save_params = params.copy()
+    save_params['results_summary'] = {
+        'mean': results['mean'],
+        'std': results['std'],
+        'min': results['min'],
+        'max': results['max'],
+        'n_events_completed': results['n_events'],
+        'stopped': results.get('stopped', False),
+    }
+
+    with open(params_file, 'w', encoding='utf-8') as f:
+        json.dump(save_params, f, indent=2, ensure_ascii=False)
+
+    print(f"Saved parameters: {params_file}")
+
+    # 2. CCE生データをCSVで保存
+    cce_data_file = os.path.join(output_dir, "cce_data.csv")
+    cce_array = np.array(results['cce_list'])
+    np.savetxt(
+        cce_data_file,
+        cce_array,
+        delimiter=',',
+        header='CCE',
+        comments='',
+        fmt='%.6f'
+    )
+
+    print(f"Saved CCE data: {cce_data_file}")
+
+    # 3. ヒストグラムを画像で保存
+    histogram_file = os.path.join(output_dir, "cce_histogram.png")
+    if len(results['cce_list']) > 0:
+        plot_cce_histogram(results['cce_list'], output_file=histogram_file)
+    else:
+        print("Skipped histogram (no data)")
+
+    print(f"\n{'='*70}")
+    print(f"All results saved to: {output_dir}")
+    print('='*70)
+
+    return output_dir
+
+
 # ========== CLI ==========
 
 def main_cli():
@@ -2023,6 +2139,14 @@ if TKINTER_AVAILABLE:
             )
             self.hist_button.pack(side=tk.LEFT, padx=5)
 
+            self.save_button = ttk.Button(
+                button_frame,
+                text="Save Results",
+                command=self.save_results,
+                state="disabled"  # 最初は無効
+            )
+            self.save_button.pack(side=tk.LEFT, padx=5)
+
             ttk.Button(button_frame, text="Quit", command=self.quit).pack(side=tk.LEFT, padx=5)
     
             # === 結果サマリーエリア ===
@@ -2184,9 +2308,10 @@ if TKINTER_AVAILABLE:
                 else:
                     self.result_label.config(text="Stopped - no events completed", foreground="orange")
     
-                # 結果を保存してヒストグラムボタンを有効化
+                # 結果を保存してヒストグラム・保存ボタンを有効化
                 self.last_results = results
                 self.hist_button.config(state="normal")
+                self.save_button.config(state="normal")
     
             except Exception as e:
                 import traceback
@@ -2229,7 +2354,47 @@ if TKINTER_AVAILABLE:
     
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to show histogram: {e}")
-    
+
+        def save_results(self):
+            """シミュレーション結果を保存"""
+            if self.last_results is None:
+                messagebox.showwarning("Warning", "No results available. Run simulation first.")
+                return
+
+            try:
+                # パラメータ辞書を作成
+                params = {
+                    'detector_type': self.detector_var.get(),
+                    'n_events': int(self.n_events_var.get()),
+                    'mode': self.mode_var.get(),
+                    'alpha_MeV': float(self.alpha_mev_var.get()),
+                    'mu_e': float(self.mu_e_var.get()),
+                    'tau_e': float(self.tau_e_var.get()),
+                    'use_fullthick': self.cce_use_fullthick_var.get(),
+                    'force_recalc': self.cce_force_recalc_var.get(),
+                    'timestamp': datetime.now().isoformat(),
+                }
+
+                # 結果を保存
+                output_dir = save_simulation_results(
+                    results=self.last_results,
+                    params=params,
+                )
+
+                # 成功メッセージ
+                messagebox.showinfo(
+                    "Success",
+                    f"Results saved to:\n{output_dir}"
+                )
+
+                self.log(f"\n{'='*70}")
+                self.log(f"Results saved to: {output_dir}")
+                self.log('='*70)
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save results: {e}")
+                self.log(f"\nERROR: Failed to save results: {e}")
+
         # ========== Weighting Potential タブ ==========
     
         def _build_weighting_tab(self):

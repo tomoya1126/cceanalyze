@@ -11,6 +11,7 @@ trajectory_plot.png
 charge_histogram.png
 experiment_comparison.png
 cce_statistics.txt
+results/
 
 # ログファイル
 *.log
