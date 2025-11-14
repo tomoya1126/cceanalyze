@@ -55,7 +55,7 @@ def load_field_npz(path: str) -> dict:
     Returns
     -------
     dict
-        'V': 3D電位 [V], shape (nz, ny, nx)
+        'V': 3D電位 [V], shape (nz, ny, nx) (optional)
         'Ex', 'Ey', 'Ez': 3D電界 [V/m]
         'X', 'Y', 'Z': 1D座標軸 [m]
 
@@ -65,13 +65,17 @@ def load_field_npz(path: str) -> dict:
              含んでいます。バルク領域（z=0〜410 μm）は含まれていません。
              ramo_drift モードでは、この制約を考慮した近似が使われます。
 
-    TODO: 実際のnpz内でのキー名（大文字/小文字、x/X等）が違う場合は
-          ここを調整すること。
+    'V' (電位) はオプショナルです。含まれていない場合は None が返されます。
     """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Field file not found: {path}")
+
     data = np.load(path)
 
+    print(f"Loading field file: {path}")
+    print(f"  Available keys: {list(data.keys())}")
+
     # キー名の確認と取得
-    # TODO: 実際のキー名に合わせて調整
     result = {}
 
     # 座標軸（X, Y, Z または x, y, z）
@@ -88,18 +92,36 @@ def load_field_npz(path: str) -> dict:
             result['Z'] = data[key]
             break
 
-    # 電位と電界
-    result['V'] = data['V']
-    result['Ex'] = data['Ex']
-    result['Ey'] = data['Ey']
-    result['Ez'] = data['Ez']
+    # 必須キーのチェック
+    if 'X' not in result or 'Y' not in result or 'Z' not in result:
+        raise KeyError(f"Field file must contain X, Y, Z coordinates. Found keys: {list(data.keys())}")
 
-    print(f"Loaded field data from {path}")
+    # 電位（オプショナル）
+    if 'V' in data.files:
+        result['V'] = data['V']
+    elif 'v' in data.files:
+        result['V'] = data['v']
+    else:
+        print("  WARNING: 'V' (potential) not found in field file")
+        result['V'] = None
+
+    # 電界成分（必須）
+    required_fields = ['Ex', 'Ey', 'Ez']
+    for field in required_fields:
+        if field in data.files:
+            result[field] = data[field]
+        elif field.lower() in data.files:
+            result[field] = data[field.lower()]
+        else:
+            raise KeyError(f"Required field '{field}' not found in {path}. Available: {list(data.keys())}")
+
     print(f"  Grid: {len(result['X'])} x {len(result['Y'])} x {len(result['Z'])}")
     print(f"  X: [{result['X'].min()*1e6:.2f}, {result['X'].max()*1e6:.2f}] μm")
     print(f"  Y: [{result['Y'].min()*1e6:.2f}, {result['Y'].max()*1e6:.2f}] μm")
     print(f"  Z: [{result['Z'].min()*1e6:.2f}, {result['Z'].max()*1e6:.2f}] μm")
-    print(f"  V: [{result['V'].min():.2f}, {result['V'].max():.2f}] V")
+
+    if result['V'] is not None:
+        print(f"  V: [{result['V'].min():.2f}, {result['V'].max():.2f}] V")
 
     # Z範囲の警告（表面領域のみの場合）
     z_min_um = result['Z'].min() * 1e6
@@ -776,6 +798,13 @@ def create_electrode_masks_fullthickness(
     field_data = load_field_npz(field_path)
     V_field = field_data['V']
     Z_field = field_data['Z']
+
+    if V_field is None:
+        raise ValueError(
+            f"Field file {field_path} does not contain voltage data ('V').\n"
+            "Cannot determine electrode pattern without voltage distribution.\n"
+            "Please use a field file that includes 'V' data."
+        )
 
     # 表面に最も近いインデックスを見つける
     k_surface_full = int(np.argmin(np.abs(Z - z_surface)))
