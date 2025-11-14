@@ -59,6 +59,10 @@ def load_field_npz(path: str) -> dict:
 
     Notes
     -----
+    WARNING: 実際のnpzファイルはα線入射表面領域（z=410〜430 μm付近）のみを
+             含んでいます。バルク領域（z=0〜410 μm）は含まれていません。
+             ramo_drift モードでは、この制約を考慮した近似が使われます。
+
     TODO: 実際のnpz内でのキー名（大文字/小文字、x/X等）が違う場合は
           ここを調整すること。
     """
@@ -94,6 +98,13 @@ def load_field_npz(path: str) -> dict:
     print(f"  Y: [{result['Y'].min()*1e6:.2f}, {result['Y'].max()*1e6:.2f}] μm")
     print(f"  Z: [{result['Z'].min()*1e6:.2f}, {result['Z'].max()*1e6:.2f}] μm")
     print(f"  V: [{result['V'].min():.2f}, {result['V'].max():.2f}] V")
+
+    # Z範囲の警告（表面領域のみの場合）
+    z_min_um = result['Z'].min() * 1e6
+    if z_min_um > 50:  # 50 μm 以上から始まる場合は表面領域のみ
+        print(f"  NOTE: This field only covers the alpha-incident surface region.")
+        print(f"        Bulk region (z < {z_min_um:.0f} μm) is NOT included in this npz.")
+        print(f"        For ramo_drift mode, E-field in bulk is approximated from surface values.")
 
     return result
 
@@ -736,6 +747,160 @@ def compute_cce_for_one_event(
     return cce
 
 
+def compute_cce_ramo_ideal(
+    z_seg: np.ndarray,
+    dE_seg: np.ndarray,
+) -> float:
+    """
+    理想モード: 完全収集を仮定（CCE=1.0）。
+
+    Parameters
+    ----------
+    z_seg : np.ndarray
+        SRIMセグメントの深さ [m]（使用しない）
+    dE_seg : np.ndarray
+        各セグメントでのエネルギー付与 [eV]（使用しない）
+
+    Returns
+    -------
+    float
+        CCE = 1.0（常に完全収集）
+
+    Notes
+    -----
+    テスト用の単純化モデル。電子・正孔が必ず電極に到達し、
+    再結合や寿命の影響を受けないと仮定します。
+    """
+    return 1.0
+
+
+def compute_cce_ramo_drift(
+    phi_w: np.ndarray,
+    X: np.ndarray,
+    Y: np.ndarray,
+    Z: np.ndarray,
+    Ex: np.ndarray,
+    Ey: np.ndarray,
+    Ez: np.ndarray,
+    z_seg: np.ndarray,
+    dE_seg: np.ndarray,
+    x_event: float,
+    y_event: float,
+    z_surface: float,
+    mu_e: float,
+    tau_e: float,
+) -> float:
+    """
+    Drift モード: 実電界＋有限寿命を考慮した CCE 計算。
+
+    Parameters
+    ----------
+    phi_w : np.ndarray
+        重み電位, shape (nz, ny, nx)
+    X, Y, Z : np.ndarray
+        座標軸 [m]
+    Ex, Ey, Ez : np.ndarray
+        電界成分 [V/m], shape (nz, ny, nx)
+    z_seg : np.ndarray
+        SRIMセグメントの深さ [m]（入射面からの距離）
+    dE_seg : np.ndarray
+        各セグメントでのエネルギー付与 [eV]
+    x_event, y_event : float
+        イベントの (x, y) 位置 [m]
+    z_surface : float
+        入射面の z 座標 [m]（通常は Z[-1]）
+    mu_e : float
+        電子移動度 [cm²/Vs]
+    tau_e : float
+        電子寿命 [s]
+
+    Returns
+    -------
+    float
+        CCE (0~1)
+
+    Notes
+    -----
+    モデルの仮定：
+    - 電子のみが信号に寄与（正孔は無視）
+    - z 方向の1D近似ドリフト
+    - 有限寿命 τ_e による再結合損失を考慮
+    - 電界データは z=410〜430 μm のみ含む → バルク領域は近似
+
+    TODO: バルク領域（z < Z.min()）の電界は、表面領域の平均値で近似しています。
+          より精密なモデルでは、バルク電界の実測値または理論モデルが必要です。
+    """
+    # 総e-hペア数と生成電荷
+    N_i = dE_seg / W_EH
+    N_total = N_i.sum()
+    Q_gen = N_total * Q_E  # [C]
+
+    if N_total == 0:
+        return 0.0
+
+    # 各セグメントの重み
+    w_i = N_i / N_total
+
+    # 誘導電荷の計算
+    Q_induced = 0.0
+
+    # バルク領域の代表電界値（Z範囲内の平均）
+    # TODO: より精密な近似が必要な場合はここを改良
+    E_mag_bulk = np.sqrt(Ex**2 + Ey**2 + Ez**2).mean()  # [V/m]
+
+    for i in range(len(z_seg)):
+        # セグメント i の生成位置
+        # α線は z_surface から入射し、-z 方向（内部）に進む
+        z_i = z_surface - z_seg[i]
+
+        # collect 電極までの距離（z方向の1D近似）
+        d_i = z_seg[i]  # [m]
+
+        # 電界の取得
+        if z_i >= Z[0] and z_i <= Z[-1]:
+            # z が電界データの範囲内 → 補間で取得
+            Ex_i = trilinear_interpolate(Ex, X, Y, Z, x_event, y_event, z_i)
+            Ey_i = trilinear_interpolate(Ey, X, Y, Z, x_event, y_event, z_i)
+            Ez_i = trilinear_interpolate(Ez, X, Y, Z, x_event, y_event, z_i)
+            E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
+        else:
+            # z が電界データの範囲外（バルク領域）→ 近似値を使用
+            E_mag = E_mag_bulk  # [V/m]
+
+        # ドリフト速度 [m/s]
+        # μ_e [cm²/Vs] * E [V/m] = μ_e * 1e-4 [m²/Vs] * E [V/m] = μ_e * 1e-4 * E [m/s]
+        v_drift = mu_e * 1e-4 * E_mag  # [m/s]
+
+        if v_drift == 0:
+            # 電界がゼロの場合は電子が動けない → 寄与なし
+            continue
+
+        # ドリフト時間 [s]
+        t_drift = d_i / v_drift
+
+        # 生存確率（再結合による損失）
+        f_survival = np.exp(-t_drift / tau_e)
+
+        # 重み電位（範囲内のみ）
+        if z_i >= Z[0] and z_i <= Z[-1]:
+            phi_w_i = trilinear_interpolate(phi_w, X, Y, Z, x_event, y_event, z_i)
+        else:
+            # 範囲外の場合はスキップ（寄与なし）
+            continue
+
+        # 電子のみの誘導電荷（Shockley-Ramo）
+        # Q_e = e * f_survival * (1 - φ_w(start))
+        Q_e_i = Q_E * f_survival * (1 - phi_w_i)
+
+        # 重み付けして加算
+        Q_induced += w_i * Q_e_i
+
+    # CCE = 収集電荷 / 生成電荷
+    cce = Q_induced / Q_gen if Q_gen > 0 else 0.0
+
+    return cce
+
+
 # ========== メインシミュレーション ==========
 
 def simulate_cce(
@@ -830,15 +995,59 @@ def simulate_cce(
     z_seg, dE_seg = load_srim_ioniz(srim_path)
 
     # 3. CCEシミュレーション
-    print(f"\nSimulating {n_events} events...")
+    print(f"\n{'='*70}")
+    print(f"CCE Simulation")
+    print('='*70)
+    print(f"  Mode: {mode}")
+    print(f"  Detector: {detector_type}")
+    print(f"  Events: {n_events}")
+
+    if mode == "ramo_drift":
+        print(f"  μ_e: {mu_e} cm²/Vs")
+        print(f"  τ_e: {tau_e} s")
+
     cce_list = []
 
-    for i in range(n_events):
-        cce = compute_cce_for_one_event(phi_w, X, Y, Z, z_seg, dE_seg, rng)
-        cce_list.append(cce)
+    if mode == "ramo_ideal":
+        # 理想モード: CCE=1.0（テスト用）
+        print(f"\n  Mode: Ideal (CCE=1.0, no recombination)")
+        for i in range(n_events):
+            cce = compute_cce_ramo_ideal(z_seg, dE_seg)
+            cce_list.append(cce)
 
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"  Event {i+1}/{n_events}: CCE = {cce:.4f}")
+            if (i + 1) % 100 == 0 or i == 0:
+                print(f"  Event {i+1}/{n_events}: CCE = {cce:.4f}")
+
+    elif mode == "ramo_drift":
+        # ドリフトモード: 実電界＋寿命を考慮
+        print(f"\n  Mode: Drift (E-field + lifetime)")
+
+        # 電界データを再読み込み（Ex, Ey, Ez が必要）
+        field_data = load_field_npz(field_path)
+        Ex = field_data['Ex']
+        Ey = field_data['Ey']
+        Ez = field_data['Ez']
+
+        z_surface = Z[-1]  # 入射面（表面）
+
+        for i in range(n_events):
+            # ランダムな (x, y) 位置をサンプリング
+            x_event = rng.uniform(X[0], X[-1])
+            y_event = rng.uniform(Y[0], Y[-1])
+
+            cce = compute_cce_ramo_drift(
+                phi_w, X, Y, Z, Ex, Ey, Ez,
+                z_seg, dE_seg,
+                x_event, y_event, z_surface,
+                mu_e, tau_e
+            )
+            cce_list.append(cce)
+
+            if (i + 1) % 100 == 0 or i == 0:
+                print(f"  Event {i+1}/{n_events}: CCE = {cce:.4f}")
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Must be 'ramo_ideal' or 'ramo_drift'.")
 
     cce_array = np.array(cce_list)
     mean_cce = cce_array.mean()
@@ -1028,6 +1237,7 @@ class CCESimulationGUI(tk.Tk):
 
         self._build_widgets()
         self.running = False
+        self.last_results = None  # 最後の結果を保存
 
     def _build_widgets(self):
         """ウィジェット配置"""
@@ -1117,6 +1327,14 @@ class CCESimulationGUI(tk.Tk):
             command=self.run_simulation
         )
         self.run_button.pack(side=tk.LEFT, padx=5)
+
+        self.hist_button = ttk.Button(
+            button_frame,
+            text="Show Histogram",
+            command=self.show_histogram,
+            state="disabled"  # 最初は無効
+        )
+        self.hist_button.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(button_frame, text="Quit", command=self.quit).pack(side=tk.LEFT, padx=5)
 
@@ -1244,6 +1462,10 @@ class CCESimulationGUI(tk.Tk):
             )
             self.result_label.config(text=result_text, foreground="green")
 
+            # 結果を保存してヒストグラムボタンを有効化
+            self.last_results = results
+            self.hist_button.config(state="normal")
+
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
@@ -1257,6 +1479,32 @@ class CCESimulationGUI(tk.Tk):
             # ボタンを再度有効化
             self.run_button.config(state="normal")
             self.running = False
+
+    def show_histogram(self):
+        """CCE ヒストグラムを別ウィンドウに表示"""
+        if self.last_results is None:
+            messagebox.showwarning("Warning", "No results available. Run simulation first.")
+            return
+
+        try:
+            cce_list = self.last_results['cce_list']
+            cce_array = np.array(cce_list)
+
+            # matplotlib で別ウィンドウに表示
+            plt.figure(figsize=(10, 6))
+            plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black')
+            plt.axvline(cce_array.mean(), color='red', linestyle='--', linewidth=2,
+                        label=f'Mean = {cce_array.mean():.4f}')
+            plt.xlabel('CCE', fontsize=12)
+            plt.ylabel('Counts', fontsize=12)
+            plt.title(f'CCE Distribution (N={len(cce_list)})', fontsize=14)
+            plt.legend(fontsize=11)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to show histogram: {e}")
 
 
 def main_gui():
