@@ -726,7 +726,7 @@ def create_electrode_masks_fullthickness(
     Y: np.ndarray,
     Z: np.ndarray,
     z_surface: float = 430e-6,
-    eps: float = 1.0,
+    eps: float = 0.1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     OpenSTF風の電極マスクを作成（裏面 + 表面電極パターン）。
@@ -740,7 +740,9 @@ def create_electrode_masks_fullthickness(
     z_surface : float
         電極面のz座標 [m]、デフォルトは430μm
     eps : float
-        電位判定の許容誤差 [V]
+        電極判定の閾値（電位範囲の割合、0-1）
+        例: eps=0.1 → 上位10%を収集電極、下位10%をグラウンド電極
+        残りの中間領域はNeumann境界条件 (∂φ/∂z=0)
 
     Returns
     -------
@@ -809,14 +811,23 @@ def create_electrode_masks_fullthickness(
         V_min = V_surf.min()
 
     # 収集電極 (高電位側) とグラウンド電極 (低電位側) を判定
-    collect_mask[k_surface_full, :, :] = (V_surf > V_max - eps)
-    ground_mask[k_surface_full, :, :] = (V_surf < V_min + eps)
+    # 電極パターンのみを固定し、それ以外はNeumann境界条件とする
+    V_range = V_max - V_min
+    # epsで指定された割合を電極とする
+    collect_threshold = V_max - eps * V_range
+    ground_threshold = V_min + eps * V_range
+
+    collect_mask[k_surface_full, :, :] = (V_surf > collect_threshold)
+    ground_mask[k_surface_full, :, :] = (V_surf < ground_threshold)
 
     n_collect = collect_mask[k_surface_full, :, :].sum()
     n_ground_surf = ground_mask[k_surface_full, :, :].sum()
+    n_neumann = ((ny * nx) - n_collect - n_ground_surf)
 
-    print(f"    Collect electrode: {n_collect} cells → φ_w=1")
-    print(f"    Ground electrode: {n_ground_surf} cells → φ_w=0")
+    print(f"    Electrode threshold: {eps*100:.1f}% of voltage range ({V_range:.2f} V)")
+    print(f"    Collect electrode: {n_collect} cells → φ_w=1 (V > {collect_threshold:.2f})")
+    print(f"    Ground electrode: {n_ground_surf} cells → φ_w=0 (V < {ground_threshold:.2f})")
+    print(f"    Neumann BC region: {n_neumann} cells (∂φ/∂z=0 at surface)")
 
     # 統計
     total_collect = collect_mask.sum()
