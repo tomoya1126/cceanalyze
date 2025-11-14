@@ -1463,6 +1463,7 @@ def simulate_cce(
     use_fullthick: bool = True,
     field_path: Optional[str] = None,
     srim_path: Optional[str] = None,
+    stop_check: Optional[callable] = None,
 ) -> dict:
     """
     n_eventsイベントをシミュレーションしてCCE統計を返す。
@@ -1497,6 +1498,8 @@ def simulate_cce(
         電界npzファイルパス（Noneの場合はdetector_typeから自動決定）
     srim_path : str | None
         SRIM IONIZファイルパス（Noneの場合はデフォルト使用）
+    stop_check : callable | None
+        停止チェック用コールバック関数。Trueを返すと計算を中断。
 
     Returns
     -------
@@ -1507,6 +1510,7 @@ def simulate_cce(
         'min': 最小CCE
         'max': 最大CCE
         'n_events': イベント数
+        'stopped': 停止された場合True
     """
     # field_path の自動決定
     if field_path is None:
@@ -1571,10 +1575,18 @@ def simulate_cce(
 
     cce_list = []
 
+    stopped = False  # 停止フラグ
+
     if mode == "ramo_ideal":
         # 理想モード: CCE=1.0（テスト用）
         print(f"\n  Mode: Ideal (CCE=1.0, no recombination)")
         for i in range(n_events):
+            # 停止チェック
+            if stop_check and stop_check():
+                print(f"\n  *** Simulation stopped by user at event {i+1}/{n_events} ***")
+                stopped = True
+                break
+
             cce = compute_cce_ramo_ideal(z_seg, dE_seg)
             cce_list.append(cce)
 
@@ -1597,6 +1609,12 @@ def simulate_cce(
         z_surface = Z[-1]  # 入射面（表面）
 
         for i in range(n_events):
+            # 停止チェック
+            if stop_check and stop_check():
+                print(f"\n  *** Simulation stopped by user at event {i+1}/{n_events} ***")
+                stopped = True
+                break
+
             # ランダムな (x, y) 位置をサンプリング
             x_event = rng.uniform(X[0], X[-1])
             y_event = rng.uniform(Y[0], Y[-1])
@@ -1616,13 +1634,32 @@ def simulate_cce(
         raise ValueError(f"Unknown mode: {mode}. Must be 'ramo_ideal' or 'ramo_drift'.")
 
     cce_array = np.array(cce_list)
+
+    # 停止された場合やイベントがない場合の処理
+    if len(cce_array) == 0:
+        print(f"\n{'='*70}")
+        print("Results")
+        print('='*70)
+        print(f"  No events completed.")
+        return {
+            'cce_list': [],
+            'mean': 0.0,
+            'std': 0.0,
+            'min': 0.0,
+            'max': 0.0,
+            'n_events': 0,
+            'stopped': stopped,
+        }
+
     mean_cce = cce_array.mean()
     std_cce = cce_array.std()
 
     print(f"\n{'='*70}")
     print("Results")
     print('='*70)
-    print(f"  Events: {n_events}")
+    print(f"  Completed events: {len(cce_list)}/{n_events}")
+    if stopped:
+        print(f"  (Stopped by user)")
     print(f"  Mean CCE: {mean_cce:.4f} ± {std_cce:.4f}")
     print(f"  Min CCE: {cce_array.min():.4f}")
     print(f"  Max CCE: {cce_array.max():.4f}")
@@ -1633,7 +1670,8 @@ def simulate_cce(
         'std': std_cce,
         'min': cce_array.min(),
         'max': cce_array.max(),
-        'n_events': n_events,
+        'n_events': len(cce_list),
+        'stopped': stopped,
     }
 
 
@@ -1818,8 +1856,9 @@ if TKINTER_AVAILABLE:
             self.geometry("1200x800")
     
             self.running = False
+            self.stop_requested = False  # 停止リクエストフラグ
             self.last_results = None  # 最後の結果を保存
-    
+
             # ウェイティングポテンシャルデータ
             self.weight_data = None  # {phi_w, X, Y, Z, Ex, Ey, Ez}
             self.field_path = None
@@ -1967,7 +2006,15 @@ if TKINTER_AVAILABLE:
                 command=self.run_simulation
             )
             self.run_button.pack(side=tk.LEFT, padx=5)
-    
+
+            self.stop_button = ttk.Button(
+                button_frame,
+                text="Stop Simulation",
+                command=self.stop_simulation,
+                state="disabled"  # 最初は無効
+            )
+            self.stop_button.pack(side=tk.LEFT, padx=5)
+
             self.hist_button = ttk.Button(
                 button_frame,
                 text="Show Histogram",
@@ -1975,7 +2022,7 @@ if TKINTER_AVAILABLE:
                 state="disabled"  # 最初は無効
             )
             self.hist_button.pack(side=tk.LEFT, padx=5)
-    
+
             ttk.Button(button_frame, text="Quit", command=self.quit).pack(side=tk.LEFT, padx=5)
     
             # === 結果サマリーエリア ===
@@ -2050,7 +2097,9 @@ if TKINTER_AVAILABLE:
             # 結果をクリア
             self.result_label.config(text="Running...", foreground="blue")
             self.run_button.config(state="disabled")
+            self.stop_button.config(state="normal")  # Stopボタンを有効化
             self.running = True
+            self.stop_requested = False  # 停止フラグをリセット
 
             # バックグラウンドで実行（GUIフリーズを防ぐ）
             thread = threading.Thread(
@@ -2059,6 +2108,13 @@ if TKINTER_AVAILABLE:
                 daemon=True
             )
             thread.start()
+
+        def stop_simulation(self):
+            """シミュレーションの停止をリクエスト"""
+            if self.running:
+                self.stop_requested = True
+                self.log("\n*** Stop requested by user ***")
+                self.stop_button.config(state="disabled")
     
         def _run_simulation_thread(
             self,
@@ -2076,7 +2132,10 @@ if TKINTER_AVAILABLE:
                 # stdout をキャプチャするため、簡易版として直接 log() に出力
                 # （実際の stdout リダイレクトは複雑なので、ここでは省略）
 
-                # シミュレーション実行
+                # シミュレーション実行（停止チェック用コールバック付き）
+                def check_stop():
+                    return self.stop_requested
+
                 results = simulate_cce(
                     detector_type=detector_type,
                     n_events=n_events,
@@ -2087,6 +2146,7 @@ if TKINTER_AVAILABLE:
                     seed=None,
                     force_recalc_weighting=force_recalc,
                     use_fullthick=use_fullthick,
+                    stop_check=check_stop,
                 )
     
                 # 結果表示
@@ -2094,23 +2154,35 @@ if TKINTER_AVAILABLE:
                 std_cce = results['std']
                 min_cce = results['min']
                 max_cce = results['max']
-    
+                stopped = results.get('stopped', False)
+                completed = results['n_events']
+
                 self.log("\n" + "="*70)
-                self.log("SIMULATION COMPLETED")
+                if stopped:
+                    self.log("SIMULATION STOPPED BY USER")
+                else:
+                    self.log("SIMULATION COMPLETED")
                 self.log("="*70)
-                self.log(f"  Events: {n_events}")
-                self.log(f"  Mean CCE: {mean_cce:.4f} ± {std_cce:.4f}")
-                self.log(f"  Min CCE: {min_cce:.4f}")
-                self.log(f"  Max CCE: {max_cce:.4f}")
-    
+                self.log(f"  Completed events: {completed}/{n_events}")
+                if completed > 0:
+                    self.log(f"  Mean CCE: {mean_cce:.4f} ± {std_cce:.4f}")
+                    self.log(f"  Min CCE: {min_cce:.4f}")
+                    self.log(f"  Max CCE: {max_cce:.4f}")
+                else:
+                    self.log(f"  No events completed.")
+
                 # 結果サマリー更新
-                result_text = (
-                    f"Events: {n_events}  |  "
-                    f"Mean: {mean_cce:.4f} ± {std_cce:.4f}  |  "
-                    f"Min: {min_cce:.4f}  |  "
-                    f"Max: {max_cce:.4f}"
-                )
-                self.result_label.config(text=result_text, foreground="green")
+                if completed > 0:
+                    result_text = (
+                        f"Events: {completed}/{n_events}"
+                        + (" (stopped)" if stopped else "")
+                        + f"  |  Mean: {mean_cce:.4f} ± {std_cce:.4f}  |  "
+                        f"Min: {min_cce:.4f}  |  Max: {max_cce:.4f}"
+                    )
+                    color = "orange" if stopped else "green"
+                    self.result_label.config(text=result_text, foreground=color)
+                else:
+                    self.result_label.config(text="Stopped - no events completed", foreground="orange")
     
                 # 結果を保存してヒストグラムボタンを有効化
                 self.last_results = results
@@ -2126,9 +2198,11 @@ if TKINTER_AVAILABLE:
                 self.result_label.config(text="Error occurred (see log)", foreground="red")
     
             finally:
-                # ボタンを再度有効化
+                # ボタンを再度有効化/無効化
                 self.run_button.config(state="normal")
+                self.stop_button.config(state="disabled")
                 self.running = False
+                self.stop_requested = False
     
         def show_histogram(self):
             """CCE ヒストグラムを別ウィンドウに表示"""
