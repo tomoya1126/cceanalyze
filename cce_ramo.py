@@ -652,6 +652,538 @@ def get_weighting_potential(
     return phi_w, X, Y, Z
 
 
+# ========== 全厚メッシュ生成（OpenSTF風） ==========
+
+def create_fullthickness_mesh(
+    field_path: str,
+    z_max: float = 430e-6,
+    target_dz: float = 2.5e-6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    OpenSTF風の全厚メッシュを生成（z=0 から z_max まで）。
+
+    実電界データから X, Y を取得し、Z は 0 から z_max まで均一刻みで生成。
+
+    Parameters
+    ----------
+    field_path : str
+        電界npzファイルパス（X, Yの範囲取得用）
+    z_max : float
+        最大z座標 [m]、デフォルトは430μm
+    target_dz : float
+        目標z刻み幅 [m]、デフォルトは2.5μm
+
+    Returns
+    -------
+    X, Y, Z : np.ndarray
+        座標軸 [m]
+    V_template : np.ndarray
+        テンプレート配列 shape (nz, ny, nx)、全て0で初期化
+
+    Notes
+    -----
+    実電界の表面電位分布は別途読み込んで電極マスク作成に使用する。
+    """
+    # 実電界データから X, Y を取得
+    field_data = load_field_npz(field_path)
+    X_field = field_data['X']
+    Y_field = field_data['Y']
+
+    # X, Y はそのまま使用
+    X = X_field.copy()
+    Y = Y_field.copy()
+
+    # Z を新たに生成（0 から z_max まで均一刻み）
+    nz = int(np.ceil(z_max / target_dz)) + 1
+    Z = np.linspace(0, z_max, nz)
+
+    nx = len(X)
+    ny = len(Y)
+
+    # テンプレート配列
+    V_template = np.zeros((nz, ny, nx), dtype=np.float64)
+
+    print(f"\n{'='*70}")
+    print("Full-thickness mesh generation (OpenSTF-style)")
+    print('='*70)
+    print(f"  X: [{X.min()*1e6:.1f}, {X.max()*1e6:.1f}] μm, n={nx}")
+    print(f"  Y: [{Y.min()*1e6:.1f}, {Y.max()*1e6:.1f}] μm, n={ny}")
+    print(f"  Z: [{Z.min()*1e6:.1f}, {Z.max()*1e6:.1f}] μm, n={nz}")
+    dx = X[1] - X[0] if len(X) > 1 else 0
+    dy = Y[1] - Y[0] if len(Y) > 1 else 0
+    dz = Z[1] - Z[0] if len(Z) > 1 else 0
+    print(f"  Grid spacing: dx={dx*1e6:.3f} μm, dy={dy*1e6:.3f} μm, dz={dz*1e6:.3f} μm")
+    print(f"  Total cells: {nx} × {ny} × {nz} = {nx*ny*nz:,}")
+
+    return X, Y, Z, V_template
+
+
+def create_electrode_masks_fullthickness(
+    field_path: str,
+    X: np.ndarray,
+    Y: np.ndarray,
+    Z: np.ndarray,
+    z_surface: float = 430e-6,
+    eps: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    OpenSTF風の電極マスクを作成（裏面 + 表面電極パターン）。
+
+    Parameters
+    ----------
+    field_path : str
+        電界npzファイルパス（表面電位分布取得用）
+    X, Y, Z : np.ndarray
+        全厚メッシュの座標軸 [m]
+    z_surface : float
+        電極面のz座標 [m]、デフォルトは430μm
+    eps : float
+        電位判定の許容誤差 [V]
+
+    Returns
+    -------
+    collect_mask : np.ndarray
+        収集電極マスク（True=電極、φ_w=1）, shape (nz, ny, nx)
+    ground_mask : np.ndarray
+        グラウンド電極マスク（True=電極、φ_w=0）, shape (nz, ny, nx)
+
+    Notes
+    -----
+    境界条件：
+    - 裏面 z=0: 全面グラウンド電極（φ_w=0）
+    - 表面 z=z_surface: 実電界の電位分布から収集/グラウンド電極を判定
+    """
+    nz, ny, nx = len(Z), len(Y), len(X)
+
+    # 電極マスク初期化
+    collect_mask = np.zeros((nz, ny, nx), dtype=bool)
+    ground_mask = np.zeros((nz, ny, nx), dtype=bool)
+
+    print(f"\nCreating electrode masks (OpenSTF-style, full-thickness)")
+
+    # 1. 裏面 z=0: 全面グラウンド電極
+    k_back = 0
+    ground_mask[k_back, :, :] = True
+    n_back = ground_mask[k_back, :, :].sum()
+    print(f"  Backside (z={Z[k_back]*1e6:.2f} μm): {n_back} cells → ground (φ_w=0)")
+
+    # 2. 表面 z=z_surface: 実電界データから電極パターンを取得
+    # 実電界データを読み込み
+    field_data = load_field_npz(field_path)
+    V_field = field_data['V']
+    Z_field = field_data['Z']
+
+    # 表面に最も近いインデックスを見つける
+    k_surface_full = int(np.argmin(np.abs(Z - z_surface)))
+    k_surface_field = int(np.argmin(np.abs(Z_field - z_surface)))
+
+    z_actual_full = Z[k_surface_full] * 1e6
+    z_actual_field = Z_field[k_surface_field] * 1e6
+
+    print(f"  Surface electrode plane:")
+    print(f"    Full mesh: z[{k_surface_full}] = {z_actual_full:.2f} μm")
+    print(f"    Field data: z[{k_surface_field}] = {z_actual_field:.2f} μm")
+
+    # 表面の電位分布を取得
+    V_surf = V_field[k_surface_field, :, :]
+    V_max = V_surf.max()
+    V_min = V_surf.min()
+
+    print(f"    Surface potential: [{V_min:.2f}, {V_max:.2f}] V")
+    print(f"    Epsilon: {eps} V")
+
+    # 電極パターンの判定（実電界データのサイズに合わせる）
+    # 注意: X, Y のサイズが field と full で同じと仮定
+    if V_surf.shape != (ny, nx):
+        print(f"    WARNING: Size mismatch! V_surf{V_surf.shape} vs full({ny},{nx})")
+        print(f"    Using interpolation or padding...")
+        # 簡易対応: V_surf を full mesh にコピー（同サイズと仮定）
+        V_surf_resized = np.zeros((ny, nx))
+        ny_min = min(V_surf.shape[0], ny)
+        nx_min = min(V_surf.shape[1], nx)
+        V_surf_resized[:ny_min, :nx_min] = V_surf[:ny_min, :nx_min]
+        V_surf = V_surf_resized
+        V_max = V_surf.max()
+        V_min = V_surf.min()
+
+    # 収集電極 (高電位側) とグラウンド電極 (低電位側) を判定
+    collect_mask[k_surface_full, :, :] = (V_surf > V_max - eps)
+    ground_mask[k_surface_full, :, :] = (V_surf < V_min + eps)
+
+    n_collect = collect_mask[k_surface_full, :, :].sum()
+    n_ground_surf = ground_mask[k_surface_full, :, :].sum()
+
+    print(f"    Collect electrode: {n_collect} cells → φ_w=1")
+    print(f"    Ground electrode: {n_ground_surf} cells → φ_w=0")
+
+    # 統計
+    total_collect = collect_mask.sum()
+    total_ground = ground_mask.sum()
+    print(f"\n  Total electrode cells:")
+    print(f"    Collect: {total_collect}")
+    print(f"    Ground: {total_ground} (backside + surface)")
+
+    return collect_mask, ground_mask
+
+
+# ========== Neumann境界条件対応SORソルバー ==========
+
+if NUMBA_AVAILABLE:
+    @nb.njit(parallel=True, fastmath=True)
+    def sor_step_numba_neumann(
+        phi_w: np.ndarray,
+        fixed: np.ndarray,
+        omega: float,
+        apply_neumann: bool = True,
+    ) -> float:
+        """
+        SOR 1ステップ（Neumann境界条件対応版）。
+
+        Parameters
+        ----------
+        phi_w : np.ndarray
+            重み電位, shape (nz, ny, nx)
+        fixed : np.ndarray
+            固定セル（電極）マスク, shape (nz, ny, nx)
+        omega : float
+            SOR緩和係数
+        apply_neumann : bool
+            True の場合、外側境界に Neumann 条件 (∂φ/∂n=0) を適用
+
+        Returns
+        -------
+        float
+            最大変化量
+
+        Notes
+        -----
+        Neumann境界条件 (∂φ/∂n=0):
+        - x=0, x=x_max の面: φ[i=0]=φ[i=1], φ[i=nx-1]=φ[i=nx-2]
+        - y=0, y=y_max の面: φ[j=0]=φ[j=1], φ[j=ny-1]=φ[j=ny-2]
+        - z=z_max の面（電極以外）: φ[k=nz-1]=φ[k=nz-2]
+        - z=0 の面は電極（Dirichlet）なので Neumann不要
+        """
+        nz, ny, nx = phi_w.shape
+
+        # 各スレッドのmax_diff保存用
+        thread_max_diffs = np.zeros(nz, dtype=np.float64)
+
+        # 1. 内部セルの更新（z方向並列化）
+        for k in nb.prange(1, nz-1):
+            local_max_diff = 0.0
+            for j in range(1, ny-1):
+                for i in range(1, nx-1):
+                    if fixed[k, j, i]:
+                        continue
+
+                    # 6点ステンシル
+                    phi_old = phi_w[k, j, i]
+                    phi_new = (
+                        phi_w[k, j, i-1] + phi_w[k, j, i+1] +
+                        phi_w[k, j-1, i] + phi_w[k, j+1, i] +
+                        phi_w[k-1, j, i] + phi_w[k+1, j, i]
+                    ) / 6.0
+
+                    phi_w[k, j, i] = phi_old + omega * (phi_new - phi_old)
+
+                    diff = abs(phi_w[k, j, i] - phi_old)
+                    if diff > local_max_diff:
+                        local_max_diff = diff
+
+            thread_max_diffs[k] = local_max_diff
+
+        # 2. Neumann境界条件の適用（電極でない境界セルのみ）
+        if apply_neumann:
+            # x=0 面
+            for k in range(nz):
+                for j in range(ny):
+                    if not fixed[k, j, 0]:
+                        phi_w[k, j, 0] = phi_w[k, j, 1]
+
+            # x=x_max 面
+            for k in range(nz):
+                for j in range(ny):
+                    if not fixed[k, j, nx-1]:
+                        phi_w[k, j, nx-1] = phi_w[k, j, nx-2]
+
+            # y=0 面
+            for k in range(nz):
+                for i in range(nx):
+                    if not fixed[k, 0, i]:
+                        phi_w[k, 0, i] = phi_w[k, 1, i]
+
+            # y=y_max 面
+            for k in range(nz):
+                for i in range(nx):
+                    if not fixed[k, ny-1, i]:
+                        phi_w[k, ny-1, i] = phi_w[k, ny-2, i]
+
+            # z=z_max 面（電極でない部分のみ）
+            for j in range(ny):
+                for i in range(nx):
+                    if not fixed[nz-1, j, i]:
+                        phi_w[nz-1, j, i] = phi_w[nz-2, j, i]
+
+            # z=0 面は裏面電極（全面 fixed=True）なので Neumann 不要
+
+        max_diff = thread_max_diffs.max()
+        return max_diff
+
+
+def solve_weighting_potential_fullthickness(
+    X: np.ndarray,
+    Y: np.ndarray,
+    Z: np.ndarray,
+    collect_mask: np.ndarray,
+    ground_mask: np.ndarray,
+    max_iter: int = 20000,
+    tol: float = 1e-5,
+    omega: float = 1.8,
+    num_threads: Optional[int] = None,
+    use_neumann: bool = True,
+) -> np.ndarray:
+    """
+    全厚メッシュで重み電位を計算（Neumann境界条件対応）。
+
+    Parameters
+    ----------
+    X, Y, Z : np.ndarray
+        座標軸 [m]
+    collect_mask, ground_mask : np.ndarray
+        電極マスク, shape (nz, ny, nx)
+    max_iter : int
+        最大反復回数
+    tol : float
+        収束判定閾値
+    omega : float
+        SOR緩和係数
+    num_threads : int | None
+        Numbaスレッド数
+    use_neumann : bool
+        True の場合、Neumann境界条件を適用
+
+    Returns
+    -------
+    phi_w : np.ndarray
+        重み電位, shape (nz, ny, nx)
+    """
+    nz, ny, nx = len(Z), len(Y), len(X)
+
+    # スレッド数設定
+    if NUMBA_AVAILABLE and num_threads is not None:
+        nb.set_num_threads(num_threads)
+        print(f"\nNumba threads: {num_threads}")
+
+    # グリッド間隔
+    dx = X[1] - X[0] if len(X) > 1 else 1e-6
+    dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
+    dz = Z[1] - Z[0] if len(Z) > 1 else 1e-6
+
+    print(f"\nSolving weighting potential (full-thickness, SOR + Neumann, omega={omega:.2f})...")
+    print(f"  Grid: {nx} x {ny} x {nz}")
+    print(f"  Grid spacing: dx={dx*1e6:.3f} μm, dy={dy*1e6:.3f} μm, dz={dz*1e6:.3f} μm")
+    print(f"  Max iterations: {max_iter}, tolerance: {tol}")
+    print(f"  Neumann BC: {'enabled' if use_neumann else 'disabled'}")
+    print(f"  Method: {'Numba JIT (parallel)' if NUMBA_AVAILABLE else 'Pure numpy (slow)'}")
+
+    # 初期化
+    phi_w = np.zeros((nz, ny, nx), dtype=np.float64)
+
+    # Dirichlet境界条件
+    phi_w[collect_mask] = 1.0
+    phi_w[ground_mask] = 0.0
+
+    # 固定セル
+    fixed = (collect_mask | ground_mask).astype(np.bool_)
+
+    # デバッグ情報
+    total_cells = nz * ny * nx
+    fixed_cells = fixed.sum()
+    free_cells = total_cells - fixed_cells
+    print(f"  Total cells: {total_cells:,}")
+    print(f"  Fixed cells (electrodes): {fixed_cells:,} ({fixed_cells/total_cells*100:.2f}%)")
+    print(f"  Free cells (to solve): {free_cells:,} ({free_cells/total_cells*100:.2f}%)")
+
+    # SOR反復
+    if NUMBA_AVAILABLE:
+        # Numba高速版（Neumann対応）
+        for iteration in range(max_iter):
+            max_diff = sor_step_numba_neumann(phi_w, fixed, omega, use_neumann)
+
+            # 収束判定
+            if max_diff < tol:
+                print(f"  ✓ Converged after {iteration+1} iterations (max diff={max_diff:.3e})")
+                break
+
+            if (iteration + 1) % 1000 == 0:
+                print(f"  Iteration {iteration+1}/{max_iter}, max diff={max_diff:.3e}")
+        else:
+            print(f"  ⚠ WARNING: Did not converge after {max_iter} iterations (max diff={max_diff:.3e})")
+    else:
+        # Pure numpy フォールバック（Neumann境界条件は省略）
+        print("  WARNING: Numba not available. Neumann BC not fully supported in numpy mode.")
+        for iteration in range(max_iter):
+            phi_w_old = phi_w.copy()
+
+            for k in range(1, nz-1):
+                for j in range(1, ny-1):
+                    for i in range(1, nx-1):
+                        if fixed[k, j, i]:
+                            continue
+
+                        phi_new = (
+                            phi_w[k, j, i-1] + phi_w[k, j, i+1] +
+                            phi_w[k, j-1, i] + phi_w[k, j+1, i] +
+                            phi_w[k-1, j, i] + phi_w[k+1, j, i]
+                        ) / 6.0
+
+                        phi_w[k, j, i] = phi_w[k, j, i] + omega * (phi_new - phi_w[k, j, i])
+
+            max_diff = np.abs(phi_w - phi_w_old).max()
+            if max_diff < tol:
+                print(f"  ✓ Converged after {iteration+1} iterations (max diff={max_diff:.3e})")
+                break
+
+            if (iteration + 1) % 1000 == 0:
+                print(f"  Iteration {iteration+1}/{max_iter}, max diff={max_diff:.3e}")
+        else:
+            print(f"  ⚠ WARNING: Did not converge after {max_iter} iterations")
+
+    print(f"  φ_w range: [{phi_w.min():.6f}, {phi_w.max():.6f}]")
+
+    # z層ごとの統計（最大20層まで表示）
+    print(f"  φ_w statistics by z-layer (showing every {max(1, nz//20)} layer):")
+    step = max(1, nz // 20)
+    for k in range(0, nz, step):
+        phi_layer = phi_w[k, :, :]
+        mask_layer = ~fixed[k, :, :]
+        if mask_layer.sum() > 0:
+            phi_free = phi_layer[mask_layer]
+            print(f"    z[{k:3d}] = {Z[k]*1e6:6.2f} μm: "
+                  f"min={phi_layer.min():.4f}, "
+                  f"mean(free)={phi_free.mean():.4f}, "
+                  f"max={phi_layer.max():.4f}")
+
+    return phi_w
+
+
+def get_weighting_potential_fullthickness(
+    field_path: str,
+    cache_path: Optional[str] = None,
+    force_recalc: bool = False,
+    z_max: float = 430e-6,
+    target_dz: float = 2.5e-6,
+    max_iter: int = 20000,
+    tol: float = 1e-5,
+    omega: float = 1.8,
+    num_threads: Optional[int] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    OpenSTF風の全厚重み電位をキャッシュから読み込み、または計算して保存。
+
+    Parameters
+    ----------
+    field_path : str
+        電界npzファイルパス
+    cache_path : str | None
+        キャッシュパス。None の場合は自動決定（*_weighting_fullthick.npz）
+    force_recalc : bool
+        True の場合、キャッシュを無視して再計算
+    z_max : float
+        最大z座標 [m]
+    target_dz : float
+        目標z刻み幅 [m]
+    max_iter : int
+        SOR最大反復回数
+    tol : float
+        収束判定閾値
+    omega : float
+        SOR緩和係数
+    num_threads : int | None
+        Numbaスレッド数
+
+    Returns
+    -------
+    phi_w : np.ndarray
+        重み電位, shape (nz, ny, nx)
+    X, Y, Z : np.ndarray
+        座標軸 [m]
+    """
+    # キャッシュパスの決定
+    if cache_path is None:
+        base_name = os.path.basename(field_path)
+        dir_name = os.path.dirname(field_path)
+
+        if "_field.npz" in base_name:
+            cache_name = base_name.replace("_field.npz", "_weighting_fullthick.npz")
+        else:
+            cache_name = base_name.replace(".npz", "_weighting_fullthick.npz")
+
+        cache_path = os.path.join(dir_name, cache_name)
+
+    print(f"\n{'='*70}")
+    print("Weighting Potential (Full-thickness, OpenSTF-style)")
+    print('='*70)
+    print(f"  Field: {field_path}")
+    print(f"  Cache: {cache_path}")
+
+    # キャッシュ読み込み試行
+    if not force_recalc and os.path.exists(cache_path):
+        try:
+            print(f"  ✓ Loading weighting potential from cache...")
+            cache_data = np.load(cache_path)
+            phi_w = cache_data['phi_w']
+            X = cache_data['X']
+            Y = cache_data['Y']
+            Z = cache_data['Z']
+
+            print(f"  ✓ Cache loaded successfully!")
+            print(f"     Grid: {len(X)} x {len(Y)} x {len(Z)}")
+            print(f"     phi_w range: [{phi_w.min():.4f}, {phi_w.max():.4f}]")
+
+            return phi_w, X, Y, Z
+
+        except Exception as e:
+            print(f"  ⚠ Cache load failed: {e}")
+            print(f"  → Recomputing...")
+
+    # キャッシュなし/無効 → 計算する
+    if force_recalc:
+        print(f"  → Force recalculation")
+    else:
+        print(f"  → Cache not found, computing...")
+
+    # 1. 全厚メッシュ生成
+    X, Y, Z, V_template = create_fullthickness_mesh(field_path, z_max, target_dz)
+
+    # 2. 電極マスク作成（裏面 + 表面パターン）
+    collect_mask, ground_mask = create_electrode_masks_fullthickness(
+        field_path, X, Y, Z, z_surface=z_max
+    )
+
+    # 3. 重み電位計算（Neumann境界条件対応）
+    phi_w = solve_weighting_potential_fullthickness(
+        X, Y, Z, collect_mask, ground_mask,
+        max_iter=max_iter, tol=tol, omega=omega, num_threads=num_threads,
+        use_neumann=True
+    )
+
+    # 4. キャッシュに保存
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            phi_w=phi_w,
+            X=X, Y=Y, Z=Z
+        )
+        print(f"\n  ✓ Weighting potential saved to cache: {cache_path}")
+        print(f"     File size: {os.path.getsize(cache_path) / 1024 / 1024:.2f} MB")
+    except Exception as e:
+        print(f"  ⚠ Failed to save cache: {e}")
+
+    return phi_w, X, Y, Z
+
+
 # ========== 1イベントのCCE計算 ==========
 
 def compute_cce_for_one_event(
@@ -1578,6 +2110,24 @@ if TKINTER_AVAILABLE:
             detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
             row += 1
     
+            # Full-thickness option
+            self.use_fullthick_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(
+                control_frame,
+                text="Use full-thickness (0-430 μm)",
+                variable=self.use_fullthick_var
+            ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+            # Force recalculation option
+            self.force_recalc_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                control_frame,
+                text="Force recalculation",
+                variable=self.force_recalc_var
+            ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
             # Load button
             ttk.Button(control_frame, text="Load Data", command=self.load_weighting_data).grid(
                 row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
@@ -1616,7 +2166,37 @@ if TKINTER_AVAILABLE:
                     command=self.update_weighting_plot
                 ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
                 row += 1
-    
+
+            # Line profile button
+            ttk.Button(
+                control_frame,
+                text="Show φ_w(z) Profile",
+                command=self.show_line_profile
+            ).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+            row += 1
+
+            # Statistics button
+            ttk.Button(
+                control_frame,
+                text="Show Statistics",
+                command=self.show_weight_statistics
+            ).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+            row += 1
+
+            # Line profile coordinates
+            ttk.Label(control_frame, text="Profile at (x, y):").grid(row=row, column=0, sticky=tk.W, pady=2)
+            row += 1
+
+            profile_frame = ttk.Frame(control_frame)
+            profile_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
+            ttk.Label(profile_frame, text="x [μm]:").pack(side=tk.LEFT)
+            self.profile_x_var = tk.StringVar(value="500")
+            ttk.Entry(profile_frame, textvariable=self.profile_x_var, width=8).pack(side=tk.LEFT, padx=2)
+            ttk.Label(profile_frame, text="y [μm]:").pack(side=tk.LEFT, padx=5)
+            self.profile_y_var = tk.StringVar(value="500")
+            ttk.Entry(profile_frame, textvariable=self.profile_y_var, width=8).pack(side=tk.LEFT, padx=2)
+            row += 1
+
             # 右側：プロット領域
             plot_frame = ttk.Frame(tab_frame)
             plot_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
@@ -1640,28 +2220,65 @@ if TKINTER_AVAILABLE:
             self.weight_status.grid(row=2, column=0, sticky=tk.W, pady=2)
     
         def load_weighting_data(self):
-            """ウェイティングデータを読み込み"""
+            """ウェイティングデータを読み込み（全厚or通常、強制再計算対応）"""
             detector_type = self.weight_detector_var.get()
-    
+            use_fullthick = self.use_fullthick_var.get()
+            force_recalc = self.force_recalc_var.get()
+
             try:
+                self.weight_status.config(text="Loading...", foreground="blue")
+                self.update()
+
                 # パスを決定
-                base_dir = r"C:\Users\discu\デスクトップ\python\cce\電界"
+                # 電界ディレクトリを探す（Windowsパスまたはローカルパス）
+                possible_dirs = [
+                    r"C:\Users\discu\デスクトップ\python\cce\電界",
+                    "電界",
+                    "./電界",
+                ]
+                base_dir = None
+                for d in possible_dirs:
+                    if os.path.exists(d):
+                        base_dir = d
+                        break
+
+                if base_dir is None:
+                    raise FileNotFoundError("電界 directory not found")
+
                 if detector_type == "yoko":
                     self.field_path = os.path.join(base_dir, "yokogata_field.npz")
-                    self.weight_path = os.path.join(base_dir, "yokogata_weighting.npz")
                 elif detector_type == "kushi":
                     self.field_path = os.path.join(base_dir, "kushigata_field.npz")
-                    self.weight_path = os.path.join(base_dir, "kushigata_weighting.npz")
-    
-                # データ読み込み
-                field_data = np.load(self.field_path)
-                weight_data_raw = np.load(self.weight_path)
-    
-                # ウェイティング電界を計算（中央差分）
-                phi_w = weight_data_raw['phi_w']
-                X = weight_data_raw['X']
-                Y = weight_data_raw['Y']
-                Z = weight_data_raw['Z']
+                else:
+                    raise ValueError(f"Unknown detector type: {detector_type}")
+
+                # 全厚モードか通常モードか
+                if use_fullthick:
+                    print(f"\n{'='*70}")
+                    print(f"GUI: Loading full-thickness weighting potential...")
+                    print(f"     Detector: {detector_type}")
+                    print(f"     Force recalc: {force_recalc}")
+                    print('='*70)
+
+                    # 全厚版を使う
+                    phi_w, X, Y, Z = get_weighting_potential_fullthickness(
+                        field_path=self.field_path,
+                        force_recalc=force_recalc,
+                        z_max=430e-6,
+                        target_dz=2.5e-6,
+                    )
+                else:
+                    print(f"\n{'='*70}")
+                    print(f"GUI: Loading standard weighting potential...")
+                    print(f"     Detector: {detector_type}")
+                    print(f"     Force recalc: {force_recalc}")
+                    print('='*70)
+
+                    # 通常版を使う
+                    phi_w, X, Y, Z = get_weighting_potential(
+                        field_path=self.field_path,
+                        force_recalc=force_recalc,
+                    )
     
                 dx = X[1] - X[0] if len(X) > 1 else 1e-6
                 dy = Y[1] - Y[0] if len(Y) > 1 else 1e-6
@@ -1756,7 +2373,159 @@ if TKINTER_AVAILABLE:
     
             except Exception as e:
                 print(f"Plot update error: {e}")
-    
+
+        def show_line_profile(self):
+            """φ_w(z) のline profileを表示"""
+            if self.weight_data is None:
+                messagebox.showwarning("Warning", "No weighting data loaded.")
+                return
+
+            try:
+                # ユーザー指定の(x, y)座標を取得 [μm]
+                x_um = float(self.profile_x_var.get())
+                y_um = float(self.profile_y_var.get())
+
+                phi_w = self.weight_data['phi_w']
+                X = self.weight_data['X']
+                Y = self.weight_data['Y']
+                Z = self.weight_data['Z']
+
+                # μm → m に変換
+                x_m = x_um * 1e-6
+                y_m = y_um * 1e-6
+
+                # X, Y のインデックスを探す
+                ix = np.argmin(np.abs(X - x_m))
+                iy = np.argmin(np.abs(Y - y_m))
+
+                # φ_w(z) を抽出
+                phi_w_z = phi_w[:, iy, ix]
+                z_um = Z * 1e6
+
+                # 新しいウィンドウで表示
+                profile_window = tk.Toplevel(self)
+                profile_window.title("φ_w(z) Line Profile")
+                profile_window.geometry("600x500")
+
+                # Matplotlib figure
+                fig = Figure(figsize=(6, 4))
+                ax = fig.add_subplot(111)
+                ax.plot(z_um, phi_w_z, 'b-', linewidth=2)
+                ax.set_xlabel('z [μm]')
+                ax.set_ylabel('φ_w')
+                ax.set_title(f'φ_w(z) at (x={X[ix]*1e6:.2f} μm, y={Y[iy]*1e6:.2f} μm)')
+                ax.grid(True, alpha=0.3)
+                ax.set_ylim(-0.05, 1.05)
+
+                # Canvas
+                canvas = FigureCanvasTkAgg(fig, master=profile_window)
+                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+                # Toolbar
+                toolbar = NavigationToolbar2Tk(canvas, profile_window)
+                toolbar.update()
+
+                # 統計情報
+                stats_text = f"\nStatistics:\n"
+                stats_text += f"  φ_w(z=0):   {phi_w_z[0]:.6f}\n"
+                stats_text += f"  φ_w(z=max): {phi_w_z[-1]:.6f}\n"
+                stats_text += f"  min:        {phi_w_z.min():.6f}\n"
+                stats_text += f"  max:        {phi_w_z.max():.6f}\n"
+                stats_text += f"  mean:       {phi_w_z.mean():.6f}\n"
+
+                stats_label = ttk.Label(profile_window, text=stats_text, font=('Courier', 9))
+                stats_label.pack(pady=5)
+
+                canvas.draw()
+
+            except ValueError:
+                messagebox.showerror("Error", "Invalid x or y coordinate. Please enter numbers.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to show line profile: {e}")
+
+        def show_weight_statistics(self):
+            """φ_w の統計情報を表示"""
+            if self.weight_data is None:
+                messagebox.showwarning("Warning", "No weighting data loaded.")
+                return
+
+            try:
+                phi_w = self.weight_data['phi_w']
+                X = self.weight_data['X']
+                Y = self.weight_data['Y']
+                Z = self.weight_data['Z']
+                E_wx = self.weight_data['E_wx']
+                E_wy = self.weight_data['E_wy']
+                E_wz = self.weight_data['E_wz']
+
+                nz, ny, nx = phi_w.shape
+
+                # 新しいウィンドウ
+                stats_window = tk.Toplevel(self)
+                stats_window.title("Weighting Potential Statistics")
+                stats_window.geometry("800x600")
+
+                # ScrolledText
+                text_widget = scrolledtext.ScrolledText(
+                    stats_window,
+                    width=90,
+                    height=35,
+                    font=('Courier', 9)
+                )
+                text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+                # ヘッダー
+                text_widget.insert(tk.END, "="*80 + "\n")
+                text_widget.insert(tk.END, "Weighting Potential Statistics\n")
+                text_widget.insert(tk.END, "="*80 + "\n\n")
+
+                text_widget.insert(tk.END, f"Grid dimensions: {nx} x {ny} x {nz}\n")
+                text_widget.insert(tk.END, f"X: [{X.min()*1e6:.1f}, {X.max()*1e6:.1f}] μm\n")
+                text_widget.insert(tk.END, f"Y: [{Y.min()*1e6:.1f}, {Y.max()*1e6:.1f}] μm\n")
+                text_widget.insert(tk.END, f"Z: [{Z.min()*1e6:.1f}, {Z.max()*1e6:.1f}] μm\n\n")
+
+                # Overall statistics
+                text_widget.insert(tk.END, "[Overall φ_w statistics]\n")
+                text_widget.insert(tk.END, f"  min:    {phi_w.min():.6f}\n")
+                text_widget.insert(tk.END, f"  max:    {phi_w.max():.6f}\n")
+                text_widget.insert(tk.END, f"  mean:   {phi_w.mean():.6f}\n")
+                text_widget.insert(tk.END, f"  median: {np.median(phi_w):.6f}\n\n")
+
+                # Z-dependent statistics（最大30層まで表示）
+                text_widget.insert(tk.END, f"[φ_w statistics by z-layer]\n")
+                text_widget.insert(tk.END, f"{'z[idx]':>7s} {'z[μm]':>8s} {'min':>10s} {'mean':>10s} {'median':>10s} {'max':>10s}\n")
+                text_widget.insert(tk.END, "-"*60 + "\n")
+
+                step = max(1, nz // 30)
+                for k in range(0, nz, step):
+                    layer = phi_w[k, :, :]
+                    text_widget.insert(
+                        tk.END,
+                        f"{k:7d} {Z[k]*1e6:8.2f} {layer.min():10.6f} {layer.mean():10.6f} "
+                        f"{np.median(layer):10.6f} {layer.max():10.6f}\n"
+                    )
+
+                # |E_w| statistics
+                E_mag = np.sqrt(E_wx**2 + E_wy**2 + E_wz**2)
+                text_widget.insert(tk.END, f"\n[|E_w| statistics (overall)]\n")
+                text_widget.insert(tk.END, f"  min:    {E_mag.min():.3e} V/m\n")
+                text_widget.insert(tk.END, f"  median: {np.median(E_mag):.3e} V/m\n")
+                text_widget.insert(tk.END, f"  95%:    {np.percentile(E_mag, 95):.3e} V/m\n")
+                text_widget.insert(tk.END, f"  max:    {E_mag.max():.3e} V/m\n\n")
+
+                # Surface vs backside comparison
+                text_widget.insert(tk.END, f"[Surface (z={Z[-1]*1e6:.2f} μm) vs Backside (z={Z[0]*1e6:.2f} μm)]\n")
+                phi_surface = phi_w[-1, :, :]
+                phi_back = phi_w[0, :, :]
+                text_widget.insert(tk.END, f"  Surface: mean={phi_surface.mean():.6f}, std={phi_surface.std():.6f}\n")
+                text_widget.insert(tk.END, f"  Backside: mean={phi_back.mean():.6f}, std={phi_back.std():.6f}\n")
+
+                text_widget.insert(tk.END, "\n" + "="*80 + "\n")
+                text_widget.config(state=tk.DISABLED)  # Read-only
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to show statistics: {e}")
+
         # ========== Diagnostics タブ ==========
     
         def _build_diagnostics_tab(self):
