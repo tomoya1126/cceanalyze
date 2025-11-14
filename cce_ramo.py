@@ -892,8 +892,8 @@ def compute_cce_ramo_drift(
         # Q_e = e * f_survival * (1 - φ_w(start))
         Q_e_i = Q_E * f_survival * (1 - phi_w_i)
 
-        # 重み付けして加算
-        Q_induced += w_i * Q_e_i
+        # 重み付けして加算（w_i[i] はこのセグメントの重み）
+        Q_induced += w_i[i] * Q_e_i
 
     # CCE = 収集電荷 / 生成電荷
     cce = Q_induced / Q_gen if Q_gen > 0 else 0.0
