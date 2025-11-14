@@ -2219,6 +2219,35 @@ if TKINTER_AVAILABLE:
             )
             detector_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
             row += 1
+
+            # Field File Selection
+            ttk.Label(param_frame, text="Field file:").grid(row=row, column=0, sticky=tk.W, pady=2)
+
+            # 利用可能な電界ファイルを探索
+            field_dir = "電界"
+            available_fields = []
+            if os.path.exists(field_dir):
+                for f in os.listdir(field_dir):
+                    if f.endswith(".npz"):
+                        available_fields.append(f)
+
+            # デフォルト値の設定（Autoまたは最初のファイル）
+            default_field = "Auto (from detector type)"
+            field_values = [default_field] + sorted(available_fields)
+
+            self.field_file_var = tk.StringVar(value=default_field)
+            field_combo = ttk.Combobox(
+                param_frame,
+                textvariable=self.field_file_var,
+                values=field_values,
+                state="readonly",
+                width=25
+            )
+            field_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            ttk.Label(param_frame, text="(Auto = detector type)", font=("", 8)).grid(
+                row=row, column=2, sticky=tk.W, padx=5
+            )
+            row += 1
     
             # Mode
             ttk.Label(param_frame, text="Mode:").grid(row=row, column=0, sticky=tk.W, pady=2)
@@ -2392,14 +2421,24 @@ if TKINTER_AVAILABLE:
                 use_fullthick = self.cce_use_fullthick_var.get()
                 force_recalc = self.cce_force_recalc_var.get()
 
+                # Field file selection
+                field_file_str = self.field_file_var.get()
+                if field_file_str == "Auto (from detector type)":
+                    # Auto: detector_type から自動決定（simulate_cce 内で処理）
+                    field_path = None
+                else:
+                    # 明示的に指定されたファイル
+                    field_path = os.path.join("電界", field_file_str)
+
             except ValueError as e:
                 messagebox.showerror("Input Error", f"Invalid parameter: {e}")
                 return
-    
+
             # ログクリア
             self.log_text.delete(1.0, tk.END)
             self.log("Starting simulation...")
             self.log(f"  Detector: {detector_type}")
+            self.log(f"  Field file: {field_path if field_path else 'Auto'}")
             self.log(f"  Mode: {mode}")
             self.log(f"  Events: {n_events}")
             self.log(f"  μ_e: {mu_e} cm²/Vs")
@@ -2419,7 +2458,7 @@ if TKINTER_AVAILABLE:
             # バックグラウンドで実行（GUIフリーズを防ぐ）
             thread = threading.Thread(
                 target=self._run_simulation_thread,
-                args=(detector_type, mode, n_events, mu_e, tau_e, num_threads, use_fullthick, force_recalc),
+                args=(detector_type, mode, n_events, mu_e, tau_e, num_threads, use_fullthick, force_recalc, field_path),
                 daemon=True
             )
             thread.start()
@@ -2441,6 +2480,7 @@ if TKINTER_AVAILABLE:
             num_threads: Optional[int],
             use_fullthick: bool,
             force_recalc: bool,
+            field_path: Optional[str],
         ):
             """バックグラウンドスレッドでシミュレーション実行"""
             try:
@@ -2461,6 +2501,7 @@ if TKINTER_AVAILABLE:
                     seed=None,
                     force_recalc_weighting=force_recalc,
                     use_fullthick=use_fullthick,
+                    field_path=field_path,
                     stop_check=check_stop,
                 )
     
@@ -2598,8 +2639,16 @@ if TKINTER_AVAILABLE:
                 else:
                     mode = mode_display
 
+                # field_file_var の値を取得
+                field_file_str = self.field_file_var.get()
+                if field_file_str == "Auto (from detector type)":
+                    field_path_display = "Auto"
+                else:
+                    field_path_display = field_file_str
+
                 params = {
                     'detector_type': detector_type,
+                    'field_file': field_path_display,
                     'n_events': int(self.events_var.get()),
                     'mode': mode,
                     'alpha_MeV': 5.486,  # 固定値（Am-241）
