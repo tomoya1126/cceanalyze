@@ -2569,11 +2569,29 @@ if TKINTER_AVAILABLE:
 
             try:
                 # パラメータ辞書を作成
+                # detector_var の値を内部形式に変換
+                detector_display = self.detector_var.get()
+                if "Yokogata" in detector_display or "横型" in detector_display:
+                    detector_type = "yoko"
+                elif "Kushigata" in detector_display or "くし形" in detector_display:
+                    detector_type = "kushi"
+                else:
+                    detector_type = detector_display
+
+                # mode_var の値を内部形式に変換
+                mode_display = self.mode_var.get()
+                if "Ideal" in mode_display:
+                    mode = "ramo_ideal"
+                elif "Drift" in mode_display:
+                    mode = "ramo_drift"
+                else:
+                    mode = mode_display
+
                 params = {
-                    'detector_type': self.detector_var.get(),
-                    'n_events': int(self.n_events_var.get()),
-                    'mode': self.mode_var.get(),
-                    'alpha_MeV': float(self.alpha_mev_var.get()),
+                    'detector_type': detector_type,
+                    'n_events': int(self.events_var.get()),
+                    'mode': mode,
+                    'alpha_MeV': 5.486,  # 固定値（Am-241）
                     'mu_e': float(self.mu_e_var.get()),
                     'tau_e': float(self.tau_e_var.get()),
                     'use_fullthick': self.cce_use_fullthick_var.get(),
