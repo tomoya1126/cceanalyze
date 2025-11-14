@@ -1576,6 +1576,8 @@ def simulate_cce(
         print(f"  τ_e: {tau_e} s")
 
     cce_list = []
+    x_list = []  # (x, y) 位置を記録（ramo_driftモードのみ）
+    y_list = []
 
     stopped = False  # 停止フラグ
 
@@ -1591,6 +1593,9 @@ def simulate_cce(
 
             cce = compute_cce_ramo_ideal(z_seg, dE_seg)
             cce_list.append(cce)
+            # 理想モードでは位置情報なし
+            x_list.append(None)
+            y_list.append(None)
 
             if (i + 1) % 100 == 0 or i == 0:
                 print(f"  Event {i+1}/{n_events}: CCE = {cce:.4f}")
@@ -1628,6 +1633,8 @@ def simulate_cce(
                 mu_e, tau_e
             )
             cce_list.append(cce)
+            x_list.append(x_event)
+            y_list.append(y_event)
 
             if (i + 1) % 100 == 0 or i == 0:
                 print(f"  Event {i+1}/{n_events}: CCE = {cce:.4f}")
@@ -1645,6 +1652,8 @@ def simulate_cce(
         print(f"  No events completed.")
         return {
             'cce_list': [],
+            'x_list': [],
+            'y_list': [],
             'mean': 0.0,
             'std': 0.0,
             'min': 0.0,
@@ -1668,6 +1677,8 @@ def simulate_cce(
 
     return {
         'cce_list': cce_list,
+        'x_list': x_list,
+        'y_list': y_list,
         'mean': mean_cce,
         'std': std_cce,
         'min': cce_array.min(),
@@ -1697,6 +1708,117 @@ def plot_cce_histogram(cce_list: list[float], output_file: str = "cce_histogram.
     plt.close()
 
     print(f"\nSaved histogram: {output_file}")
+
+
+# ========== CCE空間マップ描画 ==========
+
+def plot_cce_map(
+    x_list: list[float],
+    y_list: list[float],
+    cce_list: list[float],
+    output_file: Optional[str] = None,
+    nx: int = 50,
+    ny: int = 50,
+) -> None:
+    """
+    (x, y)位置ごとの平均CCEマップを描画。
+
+    Parameters
+    ----------
+    x_list : list[float]
+        各イベントのx座標 [m]
+    y_list : list[float]
+        各イベントのy座標 [m]
+    cce_list : list[float]
+        各イベントのCCE値
+    output_file : str | None
+        保存先ファイル名（Noneの場合は保存せず表示のみ）
+    nx : int
+        x方向のグリッド数
+    ny : int
+        y方向のグリッド数
+    """
+    # Noneを除外（ramo_idealモードの場合）
+    valid_indices = [
+        i for i in range(len(x_list))
+        if x_list[i] is not None and y_list[i] is not None
+    ]
+
+    if len(valid_indices) == 0:
+        print("Warning: No valid (x, y) data. CCE map requires ramo_drift mode.")
+        return
+
+    x_valid = np.array([x_list[i] for i in valid_indices])
+    y_valid = np.array([y_list[i] for i in valid_indices])
+    cce_valid = np.array([cce_list[i] for i in valid_indices])
+
+    # x, y の範囲
+    x_min, x_max = x_valid.min(), x_valid.max()
+    y_min, y_max = y_valid.min(), y_valid.max()
+
+    # グリッド作成
+    x_edges = np.linspace(x_min, x_max, nx + 1)
+    y_edges = np.linspace(y_min, y_max, ny + 1)
+
+    # 各グリッドセル内のCCE平均を計算
+    cce_map = np.full((ny, nx), np.nan)
+    counts = np.zeros((ny, nx), dtype=int)
+
+    for i in range(len(x_valid)):
+        # どのグリッドセルに属するか
+        ix = np.searchsorted(x_edges, x_valid[i]) - 1
+        iy = np.searchsorted(y_edges, y_valid[i]) - 1
+
+        # 範囲チェック
+        if 0 <= ix < nx and 0 <= iy < ny:
+            if counts[iy, ix] == 0:
+                cce_map[iy, ix] = cce_valid[i]
+            else:
+                # 累積平均
+                cce_map[iy, ix] = (
+                    cce_map[iy, ix] * counts[iy, ix] + cce_valid[i]
+                ) / (counts[iy, ix] + 1)
+            counts[iy, ix] += 1
+
+    # プロット
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # x, y グリッド中心
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2 * 1e6  # μm単位
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2 * 1e6  # μm単位
+
+    # ヒートマップ描画
+    im = ax.pcolormesh(
+        x_edges * 1e6,
+        y_edges * 1e6,
+        cce_map,
+        cmap='viridis',
+        shading='flat',
+        vmin=0.0,
+        vmax=1.0,
+    )
+
+    # カラーバー
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('CCE', fontsize=12)
+
+    # 軸ラベル
+    ax.set_xlabel('x [μm]', fontsize=12)
+    ax.set_ylabel('y [μm]', fontsize=12)
+    ax.set_title(
+        f'CCE Spatial Map (N={len(valid_indices)}, Grid={nx}x{ny})',
+        fontsize=14
+    )
+    ax.set_aspect('equal', adjustable='box')
+
+    plt.tight_layout()
+
+    if output_file:
+        plt.savefig(output_file, dpi=150)
+        plt.close()
+        print(f"\nSaved CCE map: {output_file}")
+    else:
+        plt.show()
 
 
 # ========== 結果保存 ==========
@@ -1787,15 +1909,37 @@ def save_simulation_results(
 
     # 2. CCE生データをCSVで保存
     cce_data_file = os.path.join(output_dir, "cce_data.csv")
-    cce_array = np.array(results['cce_list'])
-    np.savetxt(
-        cce_data_file,
-        cce_array,
-        delimiter=',',
-        header='CCE',
-        comments='',
-        fmt='%.6f'
-    )
+    x_list = results.get('x_list', [])
+    y_list = results.get('y_list', [])
+    cce_list = results['cce_list']
+
+    # (x, y)位置情報がある場合は3列で保存、ない場合はCCEのみ
+    if x_list and y_list and any(x is not None for x in x_list):
+        # ramo_driftモード: x, y, cceを保存
+        data_array = np.column_stack([
+            [x if x is not None else np.nan for x in x_list],
+            [y if y is not None else np.nan for y in y_list],
+            cce_list
+        ])
+        np.savetxt(
+            cce_data_file,
+            data_array,
+            delimiter=',',
+            header='x[m],y[m],CCE',
+            comments='',
+            fmt='%.8e,%.8e,%.6f'
+        )
+    else:
+        # ramo_idealモード: CCEのみ
+        cce_array = np.array(cce_list)
+        np.savetxt(
+            cce_data_file,
+            cce_array,
+            delimiter=',',
+            header='CCE',
+            comments='',
+            fmt='%.6f'
+        )
 
     print(f"Saved CCE data: {cce_data_file}")
 
@@ -1805,6 +1949,13 @@ def save_simulation_results(
         plot_cce_histogram(results['cce_list'], output_file=histogram_file)
     else:
         print("Skipped histogram (no data)")
+
+    # 4. CCE空間マップを画像で保存（ramo_driftモードのみ）
+    if x_list and y_list and any(x is not None for x in x_list):
+        cce_map_file = os.path.join(output_dir, "cce_map.png")
+        plot_cce_map(x_list, y_list, cce_list, output_file=cce_map_file)
+    else:
+        print("Skipped CCE map (requires ramo_drift mode)")
 
     print(f"\n{'='*70}")
     print(f"All results saved to: {output_dir}")
@@ -2139,6 +2290,14 @@ if TKINTER_AVAILABLE:
             )
             self.hist_button.pack(side=tk.LEFT, padx=5)
 
+            self.map_button = ttk.Button(
+                button_frame,
+                text="Show CCE Map",
+                command=self.show_cce_map,
+                state="disabled"  # 最初は無効
+            )
+            self.map_button.pack(side=tk.LEFT, padx=5)
+
             self.save_button = ttk.Button(
                 button_frame,
                 text="Save Results",
@@ -2308,9 +2467,10 @@ if TKINTER_AVAILABLE:
                 else:
                     self.result_label.config(text="Stopped - no events completed", foreground="orange")
     
-                # 結果を保存してヒストグラム・保存ボタンを有効化
+                # 結果を保存してヒストグラム・CCEマップ・保存ボタンを有効化
                 self.last_results = results
                 self.hist_button.config(state="normal")
+                self.map_button.config(state="normal")
                 self.save_button.config(state="normal")
     
             except Exception as e:
@@ -2354,6 +2514,31 @@ if TKINTER_AVAILABLE:
     
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to show histogram: {e}")
+
+        def show_cce_map(self):
+            """CCE 空間マップを別ウィンドウに表示"""
+            if self.last_results is None:
+                messagebox.showwarning("Warning", "No results available. Run simulation first.")
+                return
+
+            try:
+                x_list = self.last_results['x_list']
+                y_list = self.last_results['y_list']
+                cce_list = self.last_results['cce_list']
+
+                # ramo_drift モードか確認
+                if all(x is None for x in x_list):
+                    messagebox.showwarning(
+                        "Warning",
+                        "CCE map requires ramo_drift mode.\nramo_ideal mode has no spatial variation."
+                    )
+                    return
+
+                # CCEマップを描画（別ウィンドウ表示）
+                plot_cce_map(x_list, y_list, cce_list, output_file=None)
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to show CCE map: {e}")
 
         def save_results(self):
             """シミュレーション結果を保存"""
