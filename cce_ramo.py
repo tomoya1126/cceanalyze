@@ -1613,6 +1613,10 @@ def simulate_cce(
     field_path: Optional[str] = None,
     srim_path: Optional[str] = None,
     stop_check: Optional[callable] = None,
+    x_min: Optional[float] = None,
+    x_max: Optional[float] = None,
+    y_min: Optional[float] = None,
+    y_max: Optional[float] = None,
 ) -> dict:
     """
     n_eventsイベントをシミュレーションしてCCE統計を返す。
@@ -1649,6 +1653,14 @@ def simulate_cce(
         SRIM IONIZファイルパス（Noneの場合はデフォルト使用）
     stop_check : callable | None
         停止チェック用コールバック関数。Trueを返すと計算を中断。
+    x_min : float | None
+        照射範囲のx最小値 [m]（Noneの場合は検出器全体）
+    x_max : float | None
+        照射範囲のx最大値 [m]（Noneの場合は検出器全体）
+    y_min : float | None
+        照射範囲のy最小値 [m]（Noneの場合は検出器全体）
+    y_max : float | None
+        照射範囲のy最大値 [m]（Noneの場合は検出器全体）
 
     Returns
     -------
@@ -1784,8 +1796,14 @@ def simulate_cce(
                 break
 
             # ランダムな (x, y) 位置をサンプリング
-            x_event = rng.uniform(X[0], X[-1])
-            y_event = rng.uniform(Y[0], Y[-1])
+            # 照射範囲が指定されている場合はその範囲、指定されていない場合は検出器全体
+            x_range_min = x_min if x_min is not None else X[0]
+            x_range_max = x_max if x_max is not None else X[-1]
+            y_range_min = y_min if y_min is not None else Y[0]
+            y_range_max = y_max if y_max is not None else Y[-1]
+
+            x_event = rng.uniform(x_range_min, x_range_max)
+            y_event = rng.uniform(y_range_min, y_range_max)
 
             cce = compute_cce_ramo_drift(
                 phi_w, X, Y, Z, Ex, Ey, Ez, X_field, Y_field, Z_field,
@@ -2681,6 +2699,47 @@ if TKINTER_AVAILABLE:
             )
             row += 1
 
+            # === Irradiation range options ===
+            ttk.Label(param_frame, text="Irradiation range (x, y):", font=("", 9, "bold")).grid(
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(10, 2)
+            )
+            row += 1
+
+            # X min
+            ttk.Label(param_frame, text="X min [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.x_min_var = tk.StringVar(value="")
+            ttk.Entry(param_frame, textvariable=self.x_min_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # X max
+            ttk.Label(param_frame, text="X max [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.x_max_var = tk.StringVar(value="")
+            ttk.Entry(param_frame, textvariable=self.x_max_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # Y min
+            ttk.Label(param_frame, text="Y min [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.y_min_var = tk.StringVar(value="")
+            ttk.Entry(param_frame, textvariable=self.y_min_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # Y max
+            ttk.Label(param_frame, text="Y max [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.y_max_var = tk.StringVar(value="")
+            ttk.Entry(param_frame, textvariable=self.y_max_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            ttk.Label(param_frame, text="(empty = full detector)", font=("", 8)).grid(
+                row=row, column=2, sticky=tk.W, padx=5
+            )
+            row += 1
+
             # カラム幅調整
             param_frame.columnconfigure(1, weight=1)
     
@@ -2801,6 +2860,18 @@ if TKINTER_AVAILABLE:
                     # 明示的に指定されたファイル
                     srim_path = srim_file_str
 
+                # Irradiation range (x, y)
+                x_min_str = self.x_min_var.get().strip()
+                x_max_str = self.x_max_var.get().strip()
+                y_min_str = self.y_min_var.get().strip()
+                y_max_str = self.y_max_var.get().strip()
+
+                # 空欄の場合はNone、それ以外は μm → m に変換
+                x_min = float(x_min_str) * 1e-6 if x_min_str else None
+                x_max = float(x_max_str) * 1e-6 if x_max_str else None
+                y_min = float(y_min_str) * 1e-6 if y_min_str else None
+                y_max = float(y_max_str) * 1e-6 if y_max_str else None
+
             except ValueError as e:
                 messagebox.showerror("Input Error", f"Invalid parameter: {e}")
                 return
@@ -2818,6 +2889,15 @@ if TKINTER_AVAILABLE:
             self.log(f"  Threads: {num_threads if num_threads else 'auto'}")
             self.log(f"  Use full-thickness: {use_fullthick}")
             self.log(f"  Force recalc weighting: {force_recalc}")
+
+            # Irradiation range log
+            if x_min is not None or x_max is not None or y_min is not None or y_max is not None:
+                x_range_str = f"[{x_min*1e6 if x_min is not None else 'auto'}, {x_max*1e6 if x_max is not None else 'auto'}]"
+                y_range_str = f"[{y_min*1e6 if y_min is not None else 'auto'}, {y_max*1e6 if y_max is not None else 'auto'}]"
+                self.log(f"  Irradiation range: x={x_range_str} μm, y={y_range_str} μm")
+            else:
+                self.log(f"  Irradiation range: Full detector")
+
             self.log("")
 
             # 結果をクリア
@@ -2830,7 +2910,7 @@ if TKINTER_AVAILABLE:
             # バックグラウンドで実行（GUIフリーズを防ぐ）
             thread = threading.Thread(
                 target=self._run_simulation_thread,
-                args=(detector_type, mode, n_events, mu_e, tau_e, mu_h, tau_h, num_threads, use_fullthick, force_recalc, field_path, srim_path),
+                args=(detector_type, mode, n_events, mu_e, tau_e, mu_h, tau_h, num_threads, use_fullthick, force_recalc, field_path, srim_path, x_min, x_max, y_min, y_max),
                 daemon=True
             )
             thread.start()
@@ -2856,6 +2936,10 @@ if TKINTER_AVAILABLE:
             force_recalc: bool,
             field_path: Optional[str],
             srim_path: Optional[str],
+            x_min: Optional[float],
+            x_max: Optional[float],
+            y_min: Optional[float],
+            y_max: Optional[float],
         ):
             """バックグラウンドスレッドでシミュレーション実行"""
             try:
@@ -2881,6 +2965,10 @@ if TKINTER_AVAILABLE:
                     field_path=field_path,
                     srim_path=srim_path,
                     stop_check=check_stop,
+                    x_min=x_min,
+                    x_max=x_max,
+                    y_min=y_min,
+                    y_max=y_max,
                 )
     
                 # 結果表示
