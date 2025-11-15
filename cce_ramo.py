@@ -423,6 +423,96 @@ def get_bulk_field_cached(
     return Ex_bulk, Ey_bulk, Ez_bulk, X_bulk, Y_bulk, Z_bulk
 
 
+def get_full_field(
+    field_path: str,
+    V_bias: float = 100.0,
+    thickness: float = 430e-6,
+    target_dz_bulk: float = 5e-6,
+    force_recalc: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    バルク領域と表面領域の電場を統合して、全厚(0～430μm)の電場データを返す。
+
+    Parameters
+    ----------
+    field_path : str
+        表面電場npzファイルパス
+    V_bias : float
+        バイアス電圧 [V]
+    thickness : float
+        検出器全厚 [m]
+    target_dz_bulk : float
+        バルク領域のz刻み [m]
+    force_recalc : bool
+        バルク電場を強制再計算
+
+    Returns
+    -------
+    Ex_full, Ey_full, Ez_full : np.ndarray
+        全厚の電場 [V/m], shape (nz_full, ny, nx)
+    X_full, Y_full, Z_full : np.ndarray
+        全厚の座標軸 [m]
+    E_mag_full : np.ndarray
+        電場の大きさ [V/m], shape (nz_full, ny, nx)
+
+    Notes
+    -----
+    バルク領域と表面領域を結合して、z=0～430μmの連続した電場データを作成。
+    """
+    print(f"\n{'='*70}")
+    print("Full Field (Bulk + Surface)")
+    print('='*70)
+
+    # 表面電場を読み込み
+    surface_field = load_field_npz(field_path)
+    Ex_surf = surface_field['Ex']
+    Ey_surf = surface_field['Ey']
+    Ez_surf = surface_field['Ez']
+    X_surf = surface_field['X']
+    Y_surf = surface_field['Y']
+    Z_surf = surface_field['Z']
+
+    # バルク電場を取得
+    Ex_bulk, Ey_bulk, Ez_bulk, X_bulk, Y_bulk, Z_bulk = get_bulk_field_cached(
+        field_path=field_path,
+        surface_field=surface_field,
+        V_bias=V_bias,
+        thickness=thickness,
+        target_dz_bulk=target_dz_bulk,
+        cache_path=None,
+        force_recalc=force_recalc,
+    )
+
+    # X, Yは同じはず
+    if not np.allclose(X_bulk, X_surf) or not np.allclose(Y_bulk, Y_surf):
+        raise ValueError("Bulk and surface field have different X or Y grids")
+
+    # Z軸を結合（バルク: 0～Z_surf[0], 表面: Z_surf[0]～430μm）
+    # 重複を避けるため、バルクの最後の点（Z_bulk[-1]）は表面の最初の点（Z_surf[0]）と同じなので、
+    # バルクからは最後の点を除外
+    Z_full = np.concatenate([Z_bulk[:-1], Z_surf])
+
+    # 電場を結合
+    Ex_full = np.concatenate([Ex_bulk[:-1], Ex_surf], axis=0)
+    Ey_full = np.concatenate([Ey_bulk[:-1], Ey_surf], axis=0)
+    Ez_full = np.concatenate([Ez_bulk[:-1], Ez_surf], axis=0)
+
+    # 電場の大きさ
+    E_mag_full = np.sqrt(Ex_full**2 + Ey_full**2 + Ez_full**2)
+
+    X_full = X_surf
+    Y_full = Y_surf
+
+    print(f"  Full field grid: {len(X_full)} x {len(Y_full)} x {len(Z_full)}")
+    print(f"  Z range: [{Z_full[0]*1e6:.2f}, {Z_full[-1]*1e6:.2f}] μm")
+    print(f"  Ex range: [{Ex_full.min():.2e}, {Ex_full.max():.2e}] V/m")
+    print(f"  Ey range: [{Ey_full.min():.2e}, {Ey_full.max():.2e}] V/m")
+    print(f"  Ez range: [{Ez_full.min():.2e}, {Ez_full.max():.2e}] V/m")
+    print(f"  |E| range: [{E_mag_full.min():.2e}, {E_mag_full.max():.2e}] V/m")
+
+    return Ex_full, Ey_full, Ez_full, X_full, Y_full, Z_full, E_mag_full
+
+
 # ========== 電極マスク作成 ==========
 
 def create_electrode_masks(
@@ -2629,8 +2719,13 @@ if TKINTER_AVAILABLE:
             self.tab_weighting = ttk.Frame(self.notebook)
             self.notebook.add(self.tab_weighting, text="Weighting Potential")
             self._build_weighting_tab()
-    
-            # タブ3: Diagnostics（新規）
+
+            # タブ3: Electric Field（新規）
+            self.tab_field = ttk.Frame(self.notebook)
+            self.notebook.add(self.tab_field, text="Electric Field")
+            self._build_field_tab()
+
+            # タブ4: Diagnostics（新規）
             self.tab_diagnostics = ttk.Frame(self.notebook)
             self.notebook.add(self.tab_diagnostics, text="Diagnostics")
             self._build_diagnostics_tab()
@@ -3797,8 +3892,432 @@ if TKINTER_AVAILABLE:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to show statistics: {e}")
 
+        # ========== Electric Field Visualization タブ ==========
+
+        def _build_field_tab(self):
+            """Electric Fieldタブの構築"""
+            tab_frame = self.tab_field
+            tab_frame.columnconfigure(1, weight=1)
+            tab_frame.rowconfigure(0, weight=1)
+
+            # 左側：コントロールパネル
+            control_frame = ttk.LabelFrame(tab_frame, text="Controls", padding="10")
+            control_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
+
+            row = 0
+
+            # Field File Selection
+            ttk.Label(control_frame, text="Field file:").grid(row=row, column=0, sticky=tk.W, pady=2)
+
+            # 利用可能な電界ファイルを探索
+            field_dir = "電界"
+            available_fields = []
+            if os.path.exists(field_dir):
+                for f in os.listdir(field_dir):
+                    if f.endswith(".npz"):
+                        available_fields.append(os.path.join(field_dir, f))
+
+            # デフォルト値の設定
+            default_field = available_fields[0] if available_fields else "No field files found"
+            field_values = sorted(available_fields) if available_fields else [default_field]
+
+            self.field_field_file_var = tk.StringVar(value=default_field)
+            field_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.field_field_file_var,
+                values=field_values,
+                state="readonly",
+                width=15
+            )
+            field_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+
+            # Force recalculation option
+            self.field_force_recalc_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                control_frame,
+                text="Force recalculation",
+                variable=self.field_force_recalc_var
+            ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+            # Load button
+            ttk.Button(control_frame, text="Load Data", command=self.load_field_data).grid(
+                row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
+            )
+            row += 1
+
+            # Field component selection
+            ttk.Label(control_frame, text="Field component:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.field_component_var = tk.StringVar(value="|E|")
+            component_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.field_component_var,
+                values=["Ex", "Ey", "Ez", "|E|"],
+                state="readonly",
+                width=15
+            )
+            component_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            component_combo.bind("<<ComboboxSelected>>", lambda e: self.update_field_plot())
+            row += 1
+
+            # Cross-section axis selection
+            ttk.Label(control_frame, text="Cross-section axis:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.field_slice_axis_var = tk.StringVar(value="z")
+            axis_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.field_slice_axis_var,
+                values=["x", "y", "z"],
+                state="readonly",
+                width=15
+            )
+            axis_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            axis_combo.bind("<<ComboboxSelected>>", self.on_field_axis_change)
+            row += 1
+
+            # Slice position (numeric input)
+            ttk.Label(control_frame, text="Slice position [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.field_slice_position_var = tk.StringVar(value="430")
+            slice_entry = ttk.Entry(control_frame, textvariable=self.field_slice_position_var, width=15)
+            slice_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            slice_entry.bind("<Return>", lambda e: self.update_field_plot())
+            row += 1
+
+            # Position range info
+            self.field_slice_range_label = ttk.Label(control_frame, text="Range: --", foreground="gray")
+            self.field_slice_range_label.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+            row += 1
+
+            # Update plot button
+            ttk.Button(control_frame, text="Update Plot", command=self.update_field_plot).grid(
+                row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
+            )
+            row += 1
+
+            # Line profile button
+            ttk.Button(control_frame, text="Show Line Profile", command=self.show_field_line_profile).grid(
+                row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # Line profile direction
+            ttk.Label(control_frame, text="Profile direction:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.field_profile_direction_var = tk.StringVar(value="z")
+            direction_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.field_profile_direction_var,
+                values=["x", "y", "z"],
+                state="readonly",
+                width=15
+            )
+            direction_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+
+            # Line profile coordinates
+            ttk.Label(control_frame, text="Fixed coordinates:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            row += 1
+
+            profile_frame = ttk.Frame(control_frame)
+            profile_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
+
+            ttk.Label(profile_frame, text="x [μm]:").pack(side=tk.LEFT)
+            self.field_profile_x_var = tk.StringVar(value="500")
+            ttk.Entry(profile_frame, textvariable=self.field_profile_x_var, width=6).pack(side=tk.LEFT, padx=2)
+
+            ttk.Label(profile_frame, text="y [μm]:").pack(side=tk.LEFT, padx=(5,0))
+            self.field_profile_y_var = tk.StringVar(value="500")
+            ttk.Entry(profile_frame, textvariable=self.field_profile_y_var, width=6).pack(side=tk.LEFT, padx=2)
+
+            ttk.Label(profile_frame, text="z [μm]:").pack(side=tk.LEFT, padx=(5,0))
+            self.field_profile_z_var = tk.StringVar(value="215")
+            ttk.Entry(profile_frame, textvariable=self.field_profile_z_var, width=6).pack(side=tk.LEFT, padx=2)
+            row += 1
+
+            # 右側：プロット領域
+            plot_frame = ttk.Frame(tab_frame)
+            plot_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
+            plot_frame.columnconfigure(0, weight=1)
+            plot_frame.rowconfigure(0, weight=1)
+
+            # Matplotlib figure
+            self.field_fig = Figure(figsize=(8, 6))
+            self.field_ax = self.field_fig.add_subplot(111)
+            self.field_canvas = FigureCanvasTkAgg(self.field_fig, master=plot_frame)
+            self.field_canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+            # Toolbar
+            toolbar_frame = ttk.Frame(plot_frame)
+            toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+            toolbar = NavigationToolbar2Tk(self.field_canvas, toolbar_frame)
+            toolbar.update()
+
+            # データ保持用
+            self.field_data = None
+
+        def load_field_data(self):
+            """電場データをロード"""
+            try:
+                field_path = self.field_field_file_var.get()
+                force_recalc = self.field_force_recalc_var.get()
+
+                if not os.path.exists(field_path):
+                    messagebox.showerror("Error", f"Field file not found: {field_path}")
+                    return
+
+                # 全厚電場データを取得（バルク + 表面）
+                Ex, Ey, Ez, X, Y, Z, E_mag = get_full_field(
+                    field_path=field_path,
+                    V_bias=100.0,
+                    thickness=430e-6,
+                    target_dz_bulk=5e-6,
+                    force_recalc=force_recalc,
+                )
+
+                # データを保存
+                self.field_data = {
+                    'Ex': Ex,
+                    'Ey': Ey,
+                    'Ez': Ez,
+                    'E_mag': E_mag,
+                    'X': X,
+                    'Y': Y,
+                    'Z': Z,
+                }
+
+                messagebox.showinfo("Success", "Field data loaded successfully!")
+
+                # プロットを更新
+                self.on_field_axis_change()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load field data: {e}")
+                import traceback
+                traceback.print_exc()
+
+        def on_field_axis_change(self, *args):
+            """軸変更時にスライス位置の範囲を更新"""
+            if self.field_data is None:
+                return
+
+            axis = self.field_slice_axis_var.get()
+            X = self.field_data['X']
+            Y = self.field_data['Y']
+            Z = self.field_data['Z']
+
+            if axis == 'x':
+                min_val = X[0] * 1e6
+                max_val = X[-1] * 1e6
+                self.field_slice_position_var.set(f"{(min_val + max_val) / 2:.1f}")
+            elif axis == 'y':
+                min_val = Y[0] * 1e6
+                max_val = Y[-1] * 1e6
+                self.field_slice_position_var.set(f"{(min_val + max_val) / 2:.1f}")
+            else:  # z
+                min_val = Z[0] * 1e6
+                max_val = Z[-1] * 1e6
+                self.field_slice_position_var.set(f"{Z[-1] * 1e6:.1f}")  # デフォルトは表面
+
+            self.field_slice_range_label.config(text=f"Range: [{min_val:.1f}, {max_val:.1f}] μm")
+            self.update_field_plot()
+
+        def update_field_plot(self, *args):
+            """電場プロットを更新（x, y, z軸の断面に対応）"""
+            if self.field_data is None:
+                return
+
+            try:
+                # 設定を取得
+                axis = self.field_slice_axis_var.get()
+                position_um = float(self.field_slice_position_var.get())
+                position_m = position_um * 1e-6
+                component = self.field_component_var.get()
+
+                Ex = self.field_data['Ex']
+                Ey = self.field_data['Ey']
+                Ez = self.field_data['Ez']
+                E_mag = self.field_data['E_mag']
+                X = self.field_data['X']
+                Y = self.field_data['Y']
+                Z = self.field_data['Z']
+
+                # 電場成分を選択
+                if component == "Ex":
+                    field_array = Ex
+                    label = "Ex [V/m]"
+                    cmap = 'RdBu_r'
+                elif component == "Ey":
+                    field_array = Ey
+                    label = "Ey [V/m]"
+                    cmap = 'RdBu_r'
+                elif component == "Ez":
+                    field_array = Ez
+                    label = "Ez [V/m]"
+                    cmap = 'RdBu_r'
+                else:  # |E|
+                    field_array = E_mag
+                    label = "|E| [V/m]"
+                    cmap = 'hot'
+
+                # 指定位置に最も近いインデックスを見つける
+                if axis == 'x':
+                    idx = np.argmin(np.abs(X - position_m))
+                    actual_pos = X[idx] * 1e6
+                    data = field_array[:, :, idx]  # (nz, ny)
+                    title = f"{component} at x={actual_pos:.2f} μm"
+                    extent = [Y[0]*1e6, Y[-1]*1e6, Z[0]*1e6, Z[-1]*1e6]
+                    xlabel = 'y [μm]'
+                    ylabel = 'z [μm]'
+
+                elif axis == 'y':
+                    idx = np.argmin(np.abs(Y - position_m))
+                    actual_pos = Y[idx] * 1e6
+                    data = field_array[:, idx, :]  # (nz, nx)
+                    title = f"{component} at y={actual_pos:.2f} μm"
+                    extent = [X[0]*1e6, X[-1]*1e6, Z[0]*1e6, Z[-1]*1e6]
+                    xlabel = 'x [μm]'
+                    ylabel = 'z [μm]'
+
+                else:  # z
+                    idx = np.argmin(np.abs(Z - position_m))
+                    actual_pos = Z[idx] * 1e6
+                    data = field_array[idx, :, :]  # (ny, nx)
+                    title = f"{component} at z={actual_pos:.2f} μm"
+                    extent = [X[0]*1e6, X[-1]*1e6, Y[0]*1e6, Y[-1]*1e6]
+                    xlabel = 'x [μm]'
+                    ylabel = 'y [μm]'
+
+                # プロット
+                self.field_ax.clear()
+                im = self.field_ax.imshow(
+                    data,
+                    extent=extent,
+                    origin='lower',
+                    aspect='auto',
+                    cmap=cmap,
+                )
+                self.field_ax.set_xlabel(xlabel)
+                self.field_ax.set_ylabel(ylabel)
+                self.field_ax.set_title(title)
+
+                # カラーバー
+                if hasattr(self, 'field_colorbar'):
+                    self.field_colorbar.remove()
+                self.field_colorbar = self.field_fig.colorbar(im, ax=self.field_ax, label=label)
+
+                self.field_canvas.draw()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to update plot: {e}")
+
+        def show_field_line_profile(self):
+            """電場の line profile を表示（x, y, z 方向に対応）"""
+            if self.field_data is None:
+                messagebox.showwarning("Warning", "No field data loaded.")
+                return
+
+            try:
+                # 設定を取得
+                direction = self.field_profile_direction_var.get()
+                x_um = float(self.field_profile_x_var.get())
+                y_um = float(self.field_profile_y_var.get())
+                z_um = float(self.field_profile_z_var.get())
+                component = self.field_component_var.get()
+
+                Ex = self.field_data['Ex']
+                Ey = self.field_data['Ey']
+                Ez = self.field_data['Ez']
+                E_mag = self.field_data['E_mag']
+                X = self.field_data['X']
+                Y = self.field_data['Y']
+                Z = self.field_data['Z']
+
+                # 電場成分を選択
+                if component == "Ex":
+                    field_array = Ex
+                    ylabel = "Ex [V/m]"
+                elif component == "Ey":
+                    field_array = Ey
+                    ylabel = "Ey [V/m]"
+                elif component == "Ez":
+                    field_array = Ez
+                    ylabel = "Ez [V/m]"
+                else:  # |E|
+                    field_array = E_mag
+                    ylabel = "|E| [V/m]"
+
+                # μm → m に変換
+                x_m = x_um * 1e-6
+                y_m = y_um * 1e-6
+                z_m = z_um * 1e-6
+
+                # 方向に応じてプロファイルを抽出
+                if direction == 'x':
+                    # x方向のプロファイル: y, z を固定
+                    iy = np.argmin(np.abs(Y - y_m))
+                    iz = np.argmin(np.abs(Z - z_m))
+                    profile_data = field_array[iz, iy, :]
+                    axis_data = X * 1e6
+                    xlabel = 'x [μm]'
+                    title = f'{component}(x) at (y={Y[iy]*1e6:.2f} μm, z={Z[iz]*1e6:.2f} μm)'
+
+                elif direction == 'y':
+                    # y方向のプロファイル: x, z を固定
+                    ix = np.argmin(np.abs(X - x_m))
+                    iz = np.argmin(np.abs(Z - z_m))
+                    profile_data = field_array[iz, :, ix]
+                    axis_data = Y * 1e6
+                    xlabel = 'y [μm]'
+                    title = f'{component}(y) at (x={X[ix]*1e6:.2f} μm, z={Z[iz]*1e6:.2f} μm)'
+
+                else:  # z
+                    # z方向のプロファイル: x, y を固定
+                    ix = np.argmin(np.abs(X - x_m))
+                    iy = np.argmin(np.abs(Y - y_m))
+                    profile_data = field_array[:, iy, ix]
+                    axis_data = Z * 1e6
+                    xlabel = 'z [μm]'
+                    title = f'{component}(z) at (x={X[ix]*1e6:.2f} μm, y={Y[iy]*1e6:.2f} μm)'
+
+                # 新しいウィンドウで表示
+                profile_window = tk.Toplevel(self)
+                profile_window.title(f"{component}({direction}) Line Profile")
+                profile_window.geometry("600x500")
+
+                # Matplotlib figure
+                fig = Figure(figsize=(6, 4))
+                ax = fig.add_subplot(111)
+                ax.plot(axis_data, profile_data, 'b-', linewidth=2)
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel(ylabel)
+                ax.set_title(title)
+                ax.grid(True, alpha=0.3)
+
+                # Canvas
+                canvas = FigureCanvasTkAgg(fig, master=profile_window)
+                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+                # Toolbar
+                toolbar = NavigationToolbar2Tk(canvas, profile_window)
+                toolbar.update()
+
+                # 統計情報
+                stats_text = f"\nStatistics:\n"
+                stats_text += f"  min:  {profile_data.min():.3e} V/m\n"
+                stats_text += f"  max:  {profile_data.max():.3e} V/m\n"
+                stats_text += f"  mean: {profile_data.mean():.3e} V/m\n"
+
+                stats_label = ttk.Label(profile_window, text=stats_text, font=('Courier', 9))
+                stats_label.pack(pady=5)
+
+                canvas.draw()
+
+            except ValueError as e:
+                messagebox.showerror("Error", f"Invalid coordinate value: {e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to show line profile: {e}")
+
         # ========== Diagnostics タブ ==========
-    
+
         def _build_diagnostics_tab(self):
             """Diagnosticsタブの構築"""
             tab_frame = self.tab_diagnostics
