@@ -776,7 +776,7 @@ def create_electrode_masks_fullthickness(
     Notes
     -----
     境界条件：
-    - 裏面 z=0: 全面グラウンド電極（φ_w=0）
+    - 裏面 z=0: Neumann境界条件（∂φ/∂z=0）
     - 表面 z=z_surface: 実電界の電位分布から収集/グラウンド電極を判定
     """
     nz, ny, nx = len(Z), len(Y), len(X)
@@ -787,11 +787,11 @@ def create_electrode_masks_fullthickness(
 
     print(f"\nCreating electrode masks (OpenSTF-style, full-thickness)")
 
-    # 1. 裏面 z=0: 全面グラウンド電極
+    # 1. 裏面 z=0: Neumann境界条件（∂φ/∂z=0）に変更
+    # 以前は全面グラウンド電極（Dirichlet, φ_w=0）だったが、
+    # よりフレキシブルなNeumann条件に変更
     k_back = 0
-    ground_mask[k_back, :, :] = True
-    n_back = ground_mask[k_back, :, :].sum()
-    print(f"  Backside (z={Z[k_back]*1e6:.2f} μm): {n_back} cells → ground (φ_w=0)")
+    print(f"  Backside (z={Z[k_back]*1e6:.2f} μm): Neumann BC (∂φ/∂z=0)")
 
     # 2. 表面 z=z_surface: 実電界データから電極パターンを取得
     # 実電界データを読み込み
@@ -863,7 +863,8 @@ def create_electrode_masks_fullthickness(
     total_ground = ground_mask.sum()
     print(f"\n  Total electrode cells:")
     print(f"    Collect: {total_collect}")
-    print(f"    Ground: {total_ground} (backside + surface)")
+    print(f"    Ground: {total_ground} (surface only)")
+    print(f"  Note: Backside uses Neumann BC (not fixed electrode)")
 
     return collect_mask, ground_mask
 
@@ -903,7 +904,7 @@ if NUMBA_AVAILABLE:
         - x=0, x=x_max の面: φ[i=0]=φ[i=1], φ[i=nx-1]=φ[i=nx-2]
         - y=0, y=y_max の面: φ[j=0]=φ[j=1], φ[j=ny-1]=φ[j=ny-2]
         - z=z_max の面（電極以外）: φ[k=nz-1]=φ[k=nz-2]
-        - z=0 の面は電極（Dirichlet）なので Neumann不要
+        - z=0 の面（電極以外）: φ[k=0]=φ[k=1] （裏面もNeumann条件）
         """
         nz, ny, nx = phi_w.shape
 
@@ -966,7 +967,11 @@ if NUMBA_AVAILABLE:
                     if not fixed[nz-1, j, i]:
                         phi_w[nz-1, j, i] = phi_w[nz-2, j, i]
 
-            # z=0 面は裏面電極（全面 fixed=True）なので Neumann 不要
+            # z=0 面（裏面）にもNeumann条件を適用（電極でない部分のみ）
+            for j in range(ny):
+                for i in range(nx):
+                    if not fixed[0, j, i]:
+                        phi_w[0, j, i] = phi_w[1, j, i]
 
         max_diff = thread_max_diffs.max()
         return max_diff
