@@ -1878,14 +1878,44 @@ def simulate_cce(
 
 # ========== ヒストグラム描画 ==========
 
-def plot_cce_histogram(cce_list: list[float], output_file: str = "cce_histogram.png"):
-    """CCEヒストグラムを描画して保存。"""
+def plot_cce_histogram(
+    cce_list: list[float],
+    output_file: str = "cce_histogram.png",
+    cce_min: Optional[float] = None,
+    cce_max: Optional[float] = None,
+):
+    """
+    CCEヒストグラムを描画して保存。
+
+    Parameters
+    ----------
+    cce_list : list[float]
+        CCE値のリスト
+    output_file : str
+        保存先ファイル名
+    cce_min : float | None
+        ヒストグラム表示範囲の最小値（Noneの場合は自動）
+    cce_max : float | None
+        ヒストグラム表示範囲の最大値（Noneの場合は自動）
+    """
     cce_array = np.array(cce_list)
 
     plt.figure(figsize=(10, 6))
-    plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black')
+
+    # ヒストグラム範囲の設定
+    if cce_min is not None and cce_max is not None:
+        hist_range = (cce_min, cce_max)
+    else:
+        hist_range = None
+
+    plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black', range=hist_range)
     plt.axvline(cce_array.mean(), color='red', linestyle='--', linewidth=2,
                 label=f'Mean = {cce_array.mean():.4f}')
+
+    # X軸範囲の設定
+    if cce_min is not None and cce_max is not None:
+        plt.xlim(cce_min, cce_max)
+
     plt.xlabel('CCE', fontsize=12)
     plt.ylabel('Counts', fontsize=12)
     plt.title(f'CCE Distribution (N={len(cce_list)})', fontsize=14)
@@ -1912,6 +1942,8 @@ def plot_cce_map(
     Y_electrode: Optional[np.ndarray] = None,
     Z_electrode: Optional[np.ndarray] = None,
     z_surface: float = 430e-6,
+    cce_min: Optional[float] = None,
+    cce_max: Optional[float] = None,
 ) -> None:
     """
     (x, y)位置ごとの平均CCEマップを描画。
@@ -1936,6 +1968,10 @@ def plot_cce_map(
         電位分布の座標軸 [m]（電極形状表示用）
     z_surface : float
         電極面のz座標 [m]
+    cce_min : float | None
+        CCEカラーマップの最小値（Noneの場合は0.0）
+    cce_max : float | None
+        CCEカラーマップの最大値（Noneの場合は1.0）
     """
     # Noneを除外（ramo_idealモードの場合）
     valid_indices = [
@@ -1986,6 +2022,10 @@ def plot_cce_map(
     x_centers = (x_edges[:-1] + x_edges[1:]) / 2 * 1e6  # μm単位
     y_centers = (y_edges[:-1] + y_edges[1:]) / 2 * 1e6  # μm単位
 
+    # CCE表示範囲の設定
+    vmin = cce_min if cce_min is not None else 0.0
+    vmax = cce_max if cce_max is not None else 1.0
+
     # ヒートマップ描画
     im = ax.pcolormesh(
         x_edges * 1e6,
@@ -1993,8 +2033,8 @@ def plot_cce_map(
         cce_map,
         cmap='viridis',
         shading='flat',
-        vmin=0.0,
-        vmax=1.0,
+        vmin=vmin,
+        vmax=vmax,
     )
 
     # カラーバー
@@ -2102,6 +2142,8 @@ def save_simulation_results(
     results: dict,
     params: dict,
     output_dir: Optional[str] = None,
+    cce_min: Optional[float] = None,
+    cce_max: Optional[float] = None,
 ) -> str:
     """
     シミュレーション結果を保存。
@@ -2126,6 +2168,10 @@ def save_simulation_results(
         - その他
     output_dir : str | None
         出力先ディレクトリ（Noneの場合は自動生成）
+    cce_min : float | None
+        CCE表示範囲の最小値（Noneの場合は自動）
+    cce_max : float | None
+        CCE表示範囲の最大値（Noneの場合は自動）
 
     Returns
     -------
@@ -2195,7 +2241,12 @@ def save_simulation_results(
     # 3. ヒストグラムを画像で保存
     histogram_file = os.path.join(output_dir, "cce_histogram.png")
     if len(results['cce_list']) > 0:
-        plot_cce_histogram(results['cce_list'], output_file=histogram_file)
+        plot_cce_histogram(
+            results['cce_list'],
+            output_file=histogram_file,
+            cce_min=cce_min,
+            cce_max=cce_max,
+        )
     else:
         print("Skipped histogram (no data)")
 
@@ -2209,6 +2260,8 @@ def save_simulation_results(
             X_electrode=results.get('X_electrode'),
             Y_electrode=results.get('Y_electrode'),
             Z_electrode=results.get('Z_electrode'),
+            cce_min=cce_min,
+            cce_max=cce_max,
         )
     else:
         print("Skipped CCE map (requires ramo_drift mode)")
@@ -2609,6 +2662,28 @@ if TKINTER_AVAILABLE:
             ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
             row += 1
 
+            # === CCE display range options ===
+            ttk.Label(param_frame, text="CCE display range:", font=("", 9, "bold")).grid(
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(10, 2)
+            )
+            row += 1
+
+            # CCE Min
+            ttk.Label(param_frame, text="CCE min:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.cce_min_var = tk.StringVar(value="0.0")
+            ttk.Entry(param_frame, textvariable=self.cce_min_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # CCE Max
+            ttk.Label(param_frame, text="CCE max:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.cce_max_var = tk.StringVar(value="1.0")
+            ttk.Entry(param_frame, textvariable=self.cce_max_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
             # カラム幅調整
             param_frame.columnconfigure(1, weight=1)
     
@@ -2873,16 +2948,36 @@ if TKINTER_AVAILABLE:
             if self.last_results is None:
                 messagebox.showwarning("Warning", "No results available. Run simulation first.")
                 return
-    
+
             try:
                 cce_list = self.last_results['cce_list']
                 cce_array = np.array(cce_list)
-    
+
+                # CCE表示範囲を取得
+                try:
+                    cce_min = float(self.cce_min_var.get())
+                    cce_max = float(self.cce_max_var.get())
+                except ValueError:
+                    cce_min = None
+                    cce_max = None
+
                 # matplotlib で別ウィンドウに表示
                 plt.figure(figsize=(10, 6))
-                plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black')
+
+                # ヒストグラム範囲の設定
+                if cce_min is not None and cce_max is not None:
+                    hist_range = (cce_min, cce_max)
+                else:
+                    hist_range = None
+
+                plt.hist(cce_array, bins=50, alpha=0.7, edgecolor='black', range=hist_range)
                 plt.axvline(cce_array.mean(), color='red', linestyle='--', linewidth=2,
                             label=f'Mean = {cce_array.mean():.4f}')
+
+                # X軸範囲の設定
+                if cce_min is not None and cce_max is not None:
+                    plt.xlim(cce_min, cce_max)
+
                 plt.xlabel('CCE', fontsize=12)
                 plt.ylabel('Counts', fontsize=12)
                 plt.title(f'CCE Distribution (N={len(cce_list)})', fontsize=14)
@@ -2890,7 +2985,7 @@ if TKINTER_AVAILABLE:
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
                 plt.show()
-    
+
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to show histogram: {e}")
 
@@ -2913,6 +3008,14 @@ if TKINTER_AVAILABLE:
                     )
                     return
 
+                # CCE表示範囲を取得
+                try:
+                    cce_min = float(self.cce_min_var.get())
+                    cce_max = float(self.cce_max_var.get())
+                except ValueError:
+                    cce_min = None
+                    cce_max = None
+
                 # CCEマップを描画（別ウィンドウ表示、電極形状も重ねる）
                 plot_cce_map(
                     x_list, y_list, cce_list,
@@ -2921,6 +3024,8 @@ if TKINTER_AVAILABLE:
                     X_electrode=self.last_results.get('X_electrode'),
                     Y_electrode=self.last_results.get('Y_electrode'),
                     Z_electrode=self.last_results.get('Z_electrode'),
+                    cce_min=cce_min,
+                    cce_max=cce_max,
                 )
 
             except Exception as e:
@@ -2972,10 +3077,20 @@ if TKINTER_AVAILABLE:
                     'timestamp': datetime.now().isoformat(),
                 }
 
+                # CCE表示範囲を取得
+                try:
+                    cce_min = float(self.cce_min_var.get())
+                    cce_max = float(self.cce_max_var.get())
+                except ValueError:
+                    cce_min = None
+                    cce_max = None
+
                 # 結果を保存
                 output_dir = save_simulation_results(
                     results=self.last_results,
                     params=params,
+                    cce_min=cce_min,
+                    cce_max=cce_max,
                 )
 
                 # 成功メッセージ
