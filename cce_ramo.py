@@ -1366,6 +1366,8 @@ def compute_cce_ramo_drift(
     z_surface: float,
     mu_e: float,
     tau_e: float,
+    mu_h: float = 40.0,
+    tau_h: float = 1e-8,
 ) -> float:
     """
     Drift モード: 実電界＋有限寿命を考慮した CCE 計算。
@@ -1392,6 +1394,10 @@ def compute_cce_ramo_drift(
         電子移動度 [cm²/Vs]
     tau_e : float
         電子寿命 [s]
+    mu_h : float
+        正孔移動度 [cm²/Vs]
+    tau_h : float
+        正孔寿命 [s]
 
     Returns
     -------
@@ -1401,10 +1407,12 @@ def compute_cce_ramo_drift(
     Notes
     -----
     モデルの仮定：
-    - 電子のみが信号に寄与（正孔は無視）
+    - 電子と正孔の両方が信号に寄与
     - z 方向の1D近似ドリフト
-    - 有限寿命 τ_e による再結合損失を考慮
+    - 有限寿命 τ_e, τ_h による再結合損失を考慮
     - 電界データと重み電位データの座標系が異なる場合に対応
+    - 電子: 表面電極（z=z_surface）に向かってドリフト
+    - 正孔: 裏面電極（z=0）に向かってドリフト
 
     バルク電界（z < Z_field.min()）は一様電界モデルで近似：
     表面電極付近の平均電位から V を推定し、E_bulk = V / z_surface とする。
@@ -1443,14 +1451,6 @@ def compute_cce_ramo_drift(
         # α線は z_surface から入射し、-z 方向（内部）に進む
         z_i = z_surface - z_seg[i]
 
-        # collect 電極 (z=z_surface, 表面) までの距離（z方向の1D近似）
-        # 【重要な修正】d_i = z_surface - z_i （生成位置から表面までの距離）
-        d_i = z_surface - z_i  # [m]
-
-        if d_i <= 0:
-            # 生成位置が collect 電極より上 → 寄与なし
-            continue
-
         # 電界の取得（電界データの座標系 X_field, Y_field, Z_field を使用）
         if z_i >= Z_field[0] and z_i <= Z_field[-1]:
             # z が電界データの範囲内 → 補間で取得
@@ -1462,20 +1462,6 @@ def compute_cce_ramo_drift(
             # z が電界データの範囲外（バルク領域）
             # 【修正】一様電界モデルで近似
             E_mag = E_bulk  # [V/m]
-
-        # ドリフト速度 [m/s]
-        # μ_e [cm²/Vs] * E [V/m] = μ_e * 1e-4 [m²/Vs] * E [V/m] = μ_e * 1e-4 * E [m/s]
-        v_drift = mu_e * 1e-4 * E_mag  # [m/s]
-
-        if v_drift == 0:
-            # 電界がゼロの場合は電子が動けない → 寄与なし
-            continue
-
-        # ドリフト時間 [s]
-        t_drift = d_i / v_drift
-
-        # 生存確率（再結合による損失）
-        f_survival = np.exp(-t_drift / tau_e)
 
         # 重み電位（生成位置）
         if z_i >= Z[0] and z_i <= Z[-1]:
@@ -1490,18 +1476,39 @@ def compute_cce_ramo_drift(
                 )
             phi_w_start = phi_w_bulk_cache[(x_event, y_event)]
 
-        # Shockley-Ramo: Q_induced = q * [φ_w(end) - φ_w(start)]
-        # collect 電極 (表面, z=z_surface) まで到達すると仮定: φ_w = 1
-        # より正確には、寿命を考慮して実際の終点を計算すべき
-        phi_w_end = 1.0  # collect 電極（表面）
+        # === 電子の寄与 ===
+        # collect 電極 (z=z_surface, 表面) までの距離
+        d_e = z_surface - z_i  # [m]
 
-        # N_i[i] 個のキャリアが誘起する電荷（Shockley-Ramo + 寿命減衰）
-        # 電子 (q = -e): Q = -e * [φ_w_end - φ_w_start] = e * (φ_w_start - φ_w_end)
-        # 簡易モデル: f_survival * |Δφ_w|
-        Q_e_i = N_i[i] * Q_E * f_survival * (phi_w_end - phi_w_start)
+        if d_e > 0 and E_mag > 0:
+            # 電子のドリフト速度と時間
+            v_drift_e = mu_e * 1e-4 * E_mag  # [m/s]
+            t_drift_e = d_e / v_drift_e  # [s]
 
-        # 加算
-        Q_induced += Q_e_i
+            # 生存確率（再結合による損失）
+            f_survival_e = np.exp(-t_drift_e / tau_e)
+
+            # Shockley-Ramo: 電子が表面電極（φ_w=1）に到達
+            phi_w_end_e = 1.0
+            Q_e_i = N_i[i] * Q_E * f_survival_e * (phi_w_end_e - phi_w_start)
+            Q_induced += Q_e_i
+
+        # === 正孔の寄与 ===
+        # 裏面電極 (z=0) までの距離
+        d_h = z_i  # [m]
+
+        if d_h > 0 and E_mag > 0:
+            # 正孔のドリフト速度と時間
+            v_drift_h = mu_h * 1e-4 * E_mag  # [m/s]
+            t_drift_h = d_h / v_drift_h  # [s]
+
+            # 生存確率（再結合による損失）
+            f_survival_h = np.exp(-t_drift_h / tau_h)
+
+            # Shockley-Ramo: 正孔が裏面電極（φ_w=0）に到達
+            phi_w_end_h = 0.0
+            Q_h_i = N_i[i] * Q_E * f_survival_h * (phi_w_start - phi_w_end_h)
+            Q_induced += Q_h_i
 
     # CCE = 収集電荷 / 生成電荷
     cce = Q_induced / Q_gen if Q_gen > 0 else 0.0
@@ -1517,6 +1524,8 @@ def simulate_cce(
     mode: str = "ramo_ideal",
     mu_e: float = 100.0,
     tau_e: float = 1e-8,
+    mu_h: float = 40.0,
+    tau_h: float = 1e-8,
     num_threads: Optional[int] = None,
     seed: Optional[int] = None,
     max_iter: int = 20000,
@@ -1705,7 +1714,7 @@ def simulate_cce(
                 phi_w, X, Y, Z, Ex, Ey, Ez, X_field, Y_field, Z_field,
                 z_seg, dE_seg,
                 x_event, y_event, z_surface,
-                mu_e, tau_e
+                mu_e, tau_e, mu_h, tau_h
             )
             cce_list.append(cce)
             x_list.append(x_event)
@@ -2079,6 +2088,18 @@ def main_cli():
         help="Electron lifetime [s] (for ramo_drift mode)"
     )
     parser.add_argument(
+        "--mu-h",
+        type=float,
+        default=40.0,
+        help="Hole mobility [cm^2/Vs] (for ramo_drift mode)"
+    )
+    parser.add_argument(
+        "--tau-h",
+        type=float,
+        default=1e-8,
+        help="Hole lifetime [s] (for ramo_drift mode)"
+    )
+    parser.add_argument(
         "--num-threads",
         type=int,
         default=None,
@@ -2153,6 +2174,8 @@ def main_cli():
         mode=args.mode,
         mu_e=args.mu_e,
         tau_e=args.tau_e,
+        mu_h=args.mu_h,
+        tau_h=args.tau_h,
         num_threads=args.num_threads,
         seed=args.seed,
         max_iter=args.max_iter,
@@ -2349,11 +2372,27 @@ if TKINTER_AVAILABLE:
                 row=row, column=1, sticky=(tk.W, tk.E), pady=2
             )
             row += 1
-    
+
             # τ_e
             ttk.Label(param_frame, text="τ_e [s]:").grid(row=row, column=0, sticky=tk.W, pady=2)
             self.tau_e_var = tk.StringVar(value="1e-8")
             ttk.Entry(param_frame, textvariable=self.tau_e_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # μ_h
+            ttk.Label(param_frame, text="μ_h [cm²/Vs]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.mu_h_var = tk.StringVar(value="40.0")  # SiC typical hole mobility
+            ttk.Entry(param_frame, textvariable=self.mu_h_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # τ_h
+            ttk.Label(param_frame, text="τ_h [s]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.tau_h_var = tk.StringVar(value="1e-8")
+            ttk.Entry(param_frame, textvariable=self.tau_h_var, width=28).grid(
                 row=row, column=1, sticky=(tk.W, tk.E), pady=2
             )
             row += 1
@@ -2485,6 +2524,8 @@ if TKINTER_AVAILABLE:
                 n_events = int(self.events_var.get())
                 mu_e = float(self.mu_e_var.get())
                 tau_e = float(self.tau_e_var.get())
+                mu_h = float(self.mu_h_var.get())
+                tau_h = float(self.tau_h_var.get())
 
                 threads_str = self.threads_var.get().strip()
                 num_threads = int(threads_str) if threads_str else None
@@ -2523,8 +2564,8 @@ if TKINTER_AVAILABLE:
             self.log(f"  SRIM file: {srim_path if srim_path else 'Auto'}")
             self.log(f"  Mode: {mode}")
             self.log(f"  Events: {n_events}")
-            self.log(f"  μ_e: {mu_e} cm²/Vs")
-            self.log(f"  τ_e: {tau_e} s")
+            self.log(f"  μ_e: {mu_e} cm²/Vs, τ_e: {tau_e} s")
+            self.log(f"  μ_h: {mu_h} cm²/Vs, τ_h: {tau_h} s")
             self.log(f"  Threads: {num_threads if num_threads else 'auto'}")
             self.log(f"  Use full-thickness: {use_fullthick}")
             self.log(f"  Force recalc weighting: {force_recalc}")
@@ -2540,7 +2581,7 @@ if TKINTER_AVAILABLE:
             # バックグラウンドで実行（GUIフリーズを防ぐ）
             thread = threading.Thread(
                 target=self._run_simulation_thread,
-                args=(detector_type, mode, n_events, mu_e, tau_e, num_threads, use_fullthick, force_recalc, field_path, srim_path),
+                args=(detector_type, mode, n_events, mu_e, tau_e, mu_h, tau_h, num_threads, use_fullthick, force_recalc, field_path, srim_path),
                 daemon=True
             )
             thread.start()
@@ -2559,6 +2600,8 @@ if TKINTER_AVAILABLE:
             n_events: int,
             mu_e: float,
             tau_e: float,
+            mu_h: float,
+            tau_h: float,
             num_threads: Optional[int],
             use_fullthick: bool,
             force_recalc: bool,
@@ -2580,6 +2623,8 @@ if TKINTER_AVAILABLE:
                     mode=mode,
                     mu_e=mu_e,
                     tau_e=tau_e,
+                    mu_h=mu_h,
+                    tau_h=tau_h,
                     num_threads=num_threads,
                     seed=None,
                     force_recalc_weighting=force_recalc,
