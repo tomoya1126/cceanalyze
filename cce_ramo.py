@@ -1375,7 +1375,7 @@ def compute_cce_ramo_drift(
     tau_h: float = 1e-8,
 ) -> float:
     """
-    Drift モード: 実電界＋有限寿命を考慮した CCE 計算。
+    Drift モード: 実電界＋有限寿命を考慮した CCE 計算（3D局所電場ドリフトモデル）。
 
     Parameters
     ----------
@@ -1411,21 +1411,27 @@ def compute_cce_ramo_drift(
 
     Notes
     -----
-    モデルの仮定：
-    - 電子と正孔の両方が信号に寄与
-    - z 方向の1D近似ドリフト
-    - 有限寿命 τ_e, τ_h による再結合損失を考慮
-    - 電界データと重み電位データの座標系が異なる場合に対応
-    - 電子: 表面電極（z=z_surface）に向かってドリフト
-    - 正孔: 裏面電極（z=0）に向かってドリフト
+    【改修後のモデル（3D局所電場ドリフト）】：
+    - 各生成点で局所電場ベクトル E = (Ex, Ey, Ez) を補間
+    - キャリアは電場方向に沿って寿命 τ の間だけドリフト
+      * 電子：-E 方向（電場と逆向き）
+      * 正孔：+E 方向（電場と同じ向き）
+    - ドリフト速度：v = μ * |E| (μは移動度、|E|は電場の大きさ)
+    - ドリフト距離：d = v * τ（寿命の間だけ移動）
+    - 終点座標を計算し、そこでの φ_w を補間
+    - Shockley-Ramo: Q = N * q * (φ_w_end - φ_w_start)
+    - 従来の指数減衰 f_survival は使用せず、寿命を「有効ドリフト時間」として扱う
+
+    【改修前のモデル（1D z方向近似）】との違い：
+    - 旧：z方向の距離のみでドリフトを計算（横方向電場を無視）
+    - 新：電場ベクトル全体を考慮した3Dドリフト（横型・くし形電極に対応）
 
     バルク電界（z < Z_field.min()）の処理：
     - 境界値（Z_field[0]）の電界を使用して位置依存性を保持
-
-    修正履歴：
-    - ドリフト距離を d_i = z_i に修正（collect電極 z=0 までの距離）
-    - バルク電界を境界値外挿に改善（位置依存性を保持）
     """
+    # 定数：電場の最小閾値（これ以下の電場では寄与を無視）
+    E_MIN = 1e3  # [V/m]
+
     # 総e-hペア数と生成電荷
     N_i = dE_seg / W_EH
     N_total = N_i.sum()
@@ -1449,14 +1455,15 @@ def compute_cce_ramo_drift(
         # セグメント i の生成位置
         # α線は z_surface から入射し、-z 方向（内部）に進む
         z_i = z_surface - z_seg[i]
+        x_i = x_event
+        y_i = y_event
 
         # 電界の取得（電界データの座標系 X_field, Y_field, Z_field を使用）
         if z_i >= Z_field[0] and z_i <= Z_field[-1]:
             # z が電界データの範囲内 → 補間で取得
-            Ex_i = trilinear_interpolate(Ex, X_field, Y_field, Z_field, x_event, y_event, z_i)
-            Ey_i = trilinear_interpolate(Ey, X_field, Y_field, Z_field, x_event, y_event, z_i)
-            Ez_i = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_event, y_event, z_i)
-            E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
+            Ex_i = trilinear_interpolate(Ex, X_field, Y_field, Z_field, x_i, y_i, z_i)
+            Ey_i = trilinear_interpolate(Ey, X_field, Y_field, Z_field, x_i, y_i, z_i)
+            Ez_i = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_i, y_i, z_i)
         else:
             # z が電界データの範囲外（バルク領域）→ 境界値外挿
             if (x_event, y_event) not in E_bulk_cache:
@@ -1466,12 +1473,21 @@ def compute_cce_ramo_drift(
                 E_bulk_cache[(x_event, y_event)] = (Ex_boundary, Ey_boundary, Ez_boundary)
 
             Ex_i, Ey_i, Ez_i = E_bulk_cache[(x_event, y_event)]
-            E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
+
+        # 電場の大きさ
+        E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
+
+        # 電場が小さすぎる場合はスキップ
+        if E_mag < E_MIN:
+            continue
+
+        # 電場方向の単位ベクトル
+        E_unit = np.array([Ex_i, Ey_i, Ez_i]) / E_mag
 
         # 重み電位（生成位置）
         if z_i >= Z[0] and z_i <= Z[-1]:
             # 範囲内 → 補間
-            phi_w_start = trilinear_interpolate(phi_w, X, Y, Z, x_event, y_event, z_i)
+            phi_w_start = trilinear_interpolate(phi_w, X, Y, Z, x_i, y_i, z_i)
         else:
             # 範囲外（バルク領域、z < Z.min()）
             # 境界値（Z[0]）の重み電位を使用（位置依存性を保持）
@@ -1481,39 +1497,80 @@ def compute_cce_ramo_drift(
                 )
             phi_w_start = phi_w_bulk_cache[(x_event, y_event)]
 
+        # 生成位置ベクトル
+        r_start = np.array([x_i, y_i, z_i])
+
         # === 電子の寄与 ===
-        # collect 電極 (z=z_surface, 表面) までの距離
-        d_e = z_surface - z_i  # [m]
+        # ドリフト方向：電場と逆向き（負電荷）
+        u_e = -E_unit
+        # ドリフト速度の大きさ [m/s]
+        v_e = mu_e * 1e-4 * E_mag
+        # ドリフト時間：寿命の間だけ移動（表面を超える場合はクリップ）
+        t_move_e = tau_e
 
-        if d_e > 0 and E_mag > 0:
-            # 電子のドリフト速度と時間
-            v_drift_e = mu_e * 1e-4 * E_mag  # [m/s]
-            t_drift_e = d_e / v_drift_e  # [s]
+        # 表面を超えないようにクリップ（u_e の z成分が正の場合）
+        if u_e[2] > 1e-10:  # ほぼゼロでない場合
+            t_to_surf = (z_surface - z_i) / (u_e[2] * v_e)
+            if t_to_surf > 0 and t_to_surf < t_move_e:
+                t_move_e = t_to_surf
 
-            # 生存確率（再結合による損失）
-            f_survival_e = np.exp(-t_drift_e / tau_e)
+        # 終点座標
+        r_end_e = r_start + u_e * v_e * t_move_e
+        x_end_e, y_end_e, z_end_e = r_end_e
 
-            # Shockley-Ramo: 電子が表面電極（φ_w=1）に到達
-            phi_w_end_e = 1.0
-            Q_e_i = N_i[i] * Q_E * f_survival_e * (phi_w_end_e - phi_w_start)
-            Q_induced += Q_e_i
+        # 終点が重み電位グリッド範囲内かチェック
+        if (x_end_e >= X[0] and x_end_e <= X[-1] and
+            y_end_e >= Y[0] and y_end_e <= Y[-1] and
+            z_end_e >= Z[0] and z_end_e <= Z[-1]):
+            # 終点の重み電位を補間
+            phi_w_end_e = trilinear_interpolate(phi_w, X, Y, Z, x_end_e, y_end_e, z_end_e)
+        else:
+            # 範囲外の場合は、境界値を使用するか、寄与をゼロにする
+            # ここでは簡単のため、z が表面を超えた場合は φ_w = 1.0、
+            # その他の境界を超えた場合は最近傍の境界値を使用
+            x_clipped = np.clip(x_end_e, X[0], X[-1])
+            y_clipped = np.clip(y_end_e, Y[0], Y[-1])
+            z_clipped = np.clip(z_end_e, Z[0], Z[-1])
+            phi_w_end_e = trilinear_interpolate(phi_w, X, Y, Z, x_clipped, y_clipped, z_clipped)
+
+        # Shockley-Ramo: 誘起電荷（f_survival を使わない）
+        Q_e_i = N_i[i] * Q_E * (phi_w_end_e - phi_w_start)
+        Q_induced += Q_e_i
 
         # === 正孔の寄与 ===
-        # 裏面電極 (z=0) までの距離
-        d_h = z_i  # [m]
+        # ドリフト方向：電場と同じ向き（正電荷）
+        u_h = +E_unit
+        # ドリフト速度の大きさ [m/s]
+        v_h = mu_h * 1e-4 * E_mag
+        # ドリフト時間：寿命の間だけ移動（裏面を超える場合はクリップ）
+        t_move_h = tau_h
 
-        if d_h > 0 and E_mag > 0:
-            # 正孔のドリフト速度と時間
-            v_drift_h = mu_h * 1e-4 * E_mag  # [m/s]
-            t_drift_h = d_h / v_drift_h  # [s]
+        # 裏面（z=0）を超えないようにクリップ（u_h の z成分が負の場合）
+        if u_h[2] < -1e-10:  # ほぼゼロでない場合
+            t_to_back = -z_i / (u_h[2] * v_h)  # z_i から z=0 までの時間
+            if t_to_back > 0 and t_to_back < t_move_h:
+                t_move_h = t_to_back
 
-            # 生存確率（再結合による損失）
-            f_survival_h = np.exp(-t_drift_h / tau_h)
+        # 終点座標
+        r_end_h = r_start + u_h * v_h * t_move_h
+        x_end_h, y_end_h, z_end_h = r_end_h
 
-            # Shockley-Ramo: 正孔が裏面電極（φ_w=0）に到達
-            phi_w_end_h = 0.0
-            Q_h_i = N_i[i] * Q_E * f_survival_h * (phi_w_start - phi_w_end_h)
-            Q_induced += Q_h_i
+        # 終点が重み電位グリッド範囲内かチェック
+        if (x_end_h >= X[0] and x_end_h <= X[-1] and
+            y_end_h >= Y[0] and y_end_h <= Y[-1] and
+            z_end_h >= Z[0] and z_end_h <= Z[-1]):
+            # 終点の重み電位を補間
+            phi_w_end_h = trilinear_interpolate(phi_w, X, Y, Z, x_end_h, y_end_h, z_end_h)
+        else:
+            # 範囲外の場合は、境界値を使用
+            x_clipped = np.clip(x_end_h, X[0], X[-1])
+            y_clipped = np.clip(y_end_h, Y[0], Y[-1])
+            z_clipped = np.clip(z_end_h, Z[0], Z[-1])
+            phi_w_end_h = trilinear_interpolate(phi_w, X, Y, Z, x_clipped, y_clipped, z_clipped)
+
+        # Shockley-Ramo: 誘起電荷（f_survival を使わない）
+        Q_h_i = N_i[i] * Q_E * (phi_w_start - phi_w_end_h)
+        Q_induced += Q_h_i
 
     # CCE = 収集電荷 / 生成電荷
     cce = Q_induced / Q_gen if Q_gen > 0 else 0.0
