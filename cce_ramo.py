@@ -2013,13 +2013,13 @@ def plot_cce_map(
                     X_grid, Y_grid, collect_2d.astype(float),
                     levels=[0.5],
                     colors='red',
-                    linewidths=2,
+                    linewidths=0.5,
                     linestyles='-',
                 )
                 # ラベル追加（最初の1点のみ）
                 collect_coords = np.where(collect_2d)
                 if len(collect_coords[0]) > 0:
-                    ax.plot([], [], 'r-', linewidth=2, label='Collect electrode')
+                    ax.plot([], [], 'r-', linewidth=0.5, label='Collect electrode')
 
             # Ground電極の境界線（青）
             if ground_2d.sum() > 0:
@@ -2027,13 +2027,13 @@ def plot_cce_map(
                     X_grid, Y_grid, ground_2d.astype(float),
                     levels=[0.5],
                     colors='blue',
-                    linewidths=2,
+                    linewidths=0.5,
                     linestyles='-',
                 )
                 # ラベル追加
                 ground_coords = np.where(ground_2d)
                 if len(ground_coords[0]) > 0:
-                    ax.plot([], [], 'b-', linewidth=2, label='Ground electrode')
+                    ax.plot([], [], 'b-', linewidth=0.5, label='Ground electrode')
 
             # 凡例を追加
             if collect_2d.sum() > 0 or ground_2d.sum() > 0:
