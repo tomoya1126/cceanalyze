@@ -1429,9 +1429,6 @@ def compute_cce_ramo_drift(
     バルク電界（z < Z_field.min()）の処理：
     - 境界値（Z_field[0]）の電界を使用して位置依存性を保持
     """
-    # デバッグ用：phi_w 配列全体の範囲を出力
-    print(f"[DEBUG] phi_w range: {phi_w.min():.4f} .. {phi_w.max():.4f}")
-
     # 定数：電場の最小閾値（これ以下の電場では寄与を無視）
     E_MIN = 1e3  # [V/m]
 
