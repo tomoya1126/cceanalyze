@@ -2159,6 +2159,8 @@ def save_simulation_results(
     output_dir: Optional[str] = None,
     cce_min: Optional[float] = None,
     cce_max: Optional[float] = None,
+    map_nx: int = 50,
+    map_ny: int = 50,
 ) -> str:
     """
     シミュレーション結果を保存。
@@ -2187,6 +2189,10 @@ def save_simulation_results(
         CCE表示範囲の最小値（Noneの場合は自動）
     cce_max : float | None
         CCE表示範囲の最大値（Noneの場合は自動）
+    map_nx : int
+        CCEマップのx方向の分解能（デフォルト: 50）
+    map_ny : int
+        CCEマップのy方向の分解能（デフォルト: 50）
 
     Returns
     -------
@@ -2271,6 +2277,8 @@ def save_simulation_results(
         plot_cce_map(
             x_list, y_list, cce_list,
             output_file=cce_map_file,
+            nx=map_nx,
+            ny=map_ny,
             V=results.get('V_electrode'),
             X_electrode=results.get('X_electrode'),
             Y_electrode=results.get('Y_electrode'),
@@ -2511,11 +2519,36 @@ if TKINTER_AVAILABLE:
             tab_frame = self.tab_cce
             tab_frame.columnconfigure(0, weight=1)
             tab_frame.rowconfigure(0, weight=1)
-    
-            # === パラメータ入力エリア ===
-            param_frame = ttk.LabelFrame(tab_frame, text="Parameters", padding="10")
-            param_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
-    
+
+            # === スクロール可能なパラメータ入力エリア ===
+            # 外側のフレーム（スクロールバー含む）
+            param_outer_frame = ttk.LabelFrame(tab_frame, text="Parameters", padding="5")
+            param_outer_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+
+            # Canvasとスクロールバーの設定
+            param_canvas = tk.Canvas(param_outer_frame, height=250)  # 高さを固定してスクロール可能に
+            param_scrollbar = ttk.Scrollbar(param_outer_frame, orient="vertical", command=param_canvas.yview)
+            param_scrollable_frame = ttk.Frame(param_canvas)
+
+            param_scrollable_frame.bind(
+                "<Configure>",
+                lambda e: param_canvas.configure(scrollregion=param_canvas.bbox("all"))
+            )
+
+            param_canvas.create_window((0, 0), window=param_scrollable_frame, anchor="nw")
+            param_canvas.configure(yscrollcommand=param_scrollbar.set)
+
+            param_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            param_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            # マウスホイールでのスクロールを有効化
+            def _on_mousewheel(event):
+                param_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            param_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+            # パラメータフレームはスクロール可能なフレーム内に配置
+            param_frame = param_scrollable_frame
+
             row = 0
     
             # Detector Type
@@ -2736,6 +2769,31 @@ if TKINTER_AVAILABLE:
                 row=row, column=1, sticky=(tk.W, tk.E), pady=2
             )
             ttk.Label(param_frame, text="(empty = full detector)", font=("", 8)).grid(
+                row=row, column=2, sticky=tk.W, padx=5
+            )
+            row += 1
+
+            # === CCE map resolution options ===
+            ttk.Label(param_frame, text="CCE map resolution:", font=("", 9, "bold")).grid(
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(10, 2)
+            )
+            row += 1
+
+            # Map nx
+            ttk.Label(param_frame, text="Map nx (x-bins):").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.map_nx_var = tk.StringVar(value="50")
+            ttk.Entry(param_frame, textvariable=self.map_nx_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            row += 1
+
+            # Map ny
+            ttk.Label(param_frame, text="Map ny (y-bins):").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.map_ny_var = tk.StringVar(value="50")
+            ttk.Entry(param_frame, textvariable=self.map_ny_var, width=28).grid(
+                row=row, column=1, sticky=(tk.W, tk.E), pady=2
+            )
+            ttk.Label(param_frame, text="(map resolution)", font=("", 8)).grid(
                 row=row, column=2, sticky=tk.W, padx=5
             )
             row += 1
@@ -3101,10 +3159,20 @@ if TKINTER_AVAILABLE:
                     cce_min = None
                     cce_max = None
 
+                # CCEマップの分解能を取得
+                try:
+                    map_nx = int(self.map_nx_var.get())
+                    map_ny = int(self.map_ny_var.get())
+                except ValueError:
+                    map_nx = 50  # デフォルト値
+                    map_ny = 50
+
                 # CCEマップを描画（別ウィンドウ表示、電極形状も重ねる）
                 plot_cce_map(
                     x_list, y_list, cce_list,
                     output_file=None,
+                    nx=map_nx,
+                    ny=map_ny,
                     V=self.last_results.get('V_electrode'),
                     X_electrode=self.last_results.get('X_electrode'),
                     Y_electrode=self.last_results.get('Y_electrode'),
@@ -3170,12 +3238,22 @@ if TKINTER_AVAILABLE:
                     cce_min = None
                     cce_max = None
 
+                # CCEマップの分解能を取得
+                try:
+                    map_nx = int(self.map_nx_var.get())
+                    map_ny = int(self.map_ny_var.get())
+                except ValueError:
+                    map_nx = 50  # デフォルト値
+                    map_ny = 50
+
                 # 結果を保存
                 output_dir = save_simulation_results(
                     results=self.last_results,
                     params=params,
                     cce_min=cce_min,
                     cce_max=cce_max,
+                    map_nx=map_nx,
+                    map_ny=map_ny,
                 )
 
                 # 成功メッセージ
