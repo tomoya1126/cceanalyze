@@ -2943,7 +2943,7 @@ if TKINTER_AVAILABLE:
             # Line profile button
             ttk.Button(
                 control_frame,
-                text="Show φ_w(z) Profile",
+                text="Show Line Profile",
                 command=self.show_line_profile
             ).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
             row += 1
@@ -2956,18 +2956,37 @@ if TKINTER_AVAILABLE:
             ).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
             row += 1
 
+            # Line profile direction
+            ttk.Label(control_frame, text="Profile direction:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.profile_direction_var = tk.StringVar(value="z")
+            direction_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.profile_direction_var,
+                values=["x", "y", "z"],
+                state="readonly",
+                width=10
+            )
+            direction_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+
             # Line profile coordinates
-            ttk.Label(control_frame, text="Profile at (x, y):").grid(row=row, column=0, sticky=tk.W, pady=2)
+            ttk.Label(control_frame, text="Fixed coordinates:").grid(row=row, column=0, sticky=tk.W, pady=2)
             row += 1
 
             profile_frame = ttk.Frame(control_frame)
             profile_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
+
             ttk.Label(profile_frame, text="x [μm]:").pack(side=tk.LEFT)
             self.profile_x_var = tk.StringVar(value="500")
-            ttk.Entry(profile_frame, textvariable=self.profile_x_var, width=8).pack(side=tk.LEFT, padx=2)
-            ttk.Label(profile_frame, text="y [μm]:").pack(side=tk.LEFT, padx=5)
+            ttk.Entry(profile_frame, textvariable=self.profile_x_var, width=6).pack(side=tk.LEFT, padx=2)
+
+            ttk.Label(profile_frame, text="y [μm]:").pack(side=tk.LEFT, padx=(5,0))
             self.profile_y_var = tk.StringVar(value="500")
-            ttk.Entry(profile_frame, textvariable=self.profile_y_var, width=8).pack(side=tk.LEFT, padx=2)
+            ttk.Entry(profile_frame, textvariable=self.profile_y_var, width=6).pack(side=tk.LEFT, padx=2)
+
+            ttk.Label(profile_frame, text="z [μm]:").pack(side=tk.LEFT, padx=(5,0))
+            self.profile_z_var = tk.StringVar(value="430")
+            ttk.Entry(profile_frame, textvariable=self.profile_z_var, width=6).pack(side=tk.LEFT, padx=2)
             row += 1
 
             # 右側：プロット領域
@@ -3226,15 +3245,17 @@ if TKINTER_AVAILABLE:
                 print(f"Plot update error: {e}")
 
         def show_line_profile(self):
-            """φ_w(z) のline profileを表示"""
+            """φ_w の line profile を表示（x, y, z 方向に対応）"""
             if self.weight_data is None:
                 messagebox.showwarning("Warning", "No weighting data loaded.")
                 return
 
             try:
-                # ユーザー指定の(x, y)座標を取得 [μm]
+                # 設定を取得
+                direction = self.profile_direction_var.get()
                 x_um = float(self.profile_x_var.get())
                 y_um = float(self.profile_y_var.get())
+                z_um = float(self.profile_z_var.get())
 
                 phi_w = self.weight_data['phi_w']
                 X = self.weight_data['X']
@@ -3244,27 +3265,51 @@ if TKINTER_AVAILABLE:
                 # μm → m に変換
                 x_m = x_um * 1e-6
                 y_m = y_um * 1e-6
+                z_m = z_um * 1e-6
 
-                # X, Y のインデックスを探す
-                ix = np.argmin(np.abs(X - x_m))
-                iy = np.argmin(np.abs(Y - y_m))
+                # 方向に応じてプロファイルを抽出
+                if direction == 'x':
+                    # x方向のプロファイル: y, z を固定
+                    iy = np.argmin(np.abs(Y - y_m))
+                    iz = np.argmin(np.abs(Z - z_m))
+                    profile_data = phi_w[iz, iy, :]
+                    axis_data = X * 1e6
+                    xlabel = 'x [μm]'
+                    title = f'φ_w(x) at (y={Y[iy]*1e6:.2f} μm, z={Z[iz]*1e6:.2f} μm)'
+                    stats_labels = (f"x={X[0]*1e6:.2f}", f"x={X[-1]*1e6:.2f}")
 
-                # φ_w(z) を抽出
-                phi_w_z = phi_w[:, iy, ix]
-                z_um = Z * 1e6
+                elif direction == 'y':
+                    # y方向のプロファイル: x, z を固定
+                    ix = np.argmin(np.abs(X - x_m))
+                    iz = np.argmin(np.abs(Z - z_m))
+                    profile_data = phi_w[iz, :, ix]
+                    axis_data = Y * 1e6
+                    xlabel = 'y [μm]'
+                    title = f'φ_w(y) at (x={X[ix]*1e6:.2f} μm, z={Z[iz]*1e6:.2f} μm)'
+                    stats_labels = (f"y={Y[0]*1e6:.2f}", f"y={Y[-1]*1e6:.2f}")
+
+                else:  # z
+                    # z方向のプロファイル: x, y を固定
+                    ix = np.argmin(np.abs(X - x_m))
+                    iy = np.argmin(np.abs(Y - y_m))
+                    profile_data = phi_w[:, iy, ix]
+                    axis_data = Z * 1e6
+                    xlabel = 'z [μm]'
+                    title = f'φ_w(z) at (x={X[ix]*1e6:.2f} μm, y={Y[iy]*1e6:.2f} μm)'
+                    stats_labels = (f"z={Z[0]*1e6:.2f}", f"z={Z[-1]*1e6:.2f}")
 
                 # 新しいウィンドウで表示
                 profile_window = tk.Toplevel(self)
-                profile_window.title("φ_w(z) Line Profile")
+                profile_window.title(f"φ_w({direction}) Line Profile")
                 profile_window.geometry("600x500")
 
                 # Matplotlib figure
                 fig = Figure(figsize=(6, 4))
                 ax = fig.add_subplot(111)
-                ax.plot(z_um, phi_w_z, 'b-', linewidth=2)
-                ax.set_xlabel('z [μm]')
+                ax.plot(axis_data, profile_data, 'b-', linewidth=2)
+                ax.set_xlabel(xlabel)
                 ax.set_ylabel('φ_w')
-                ax.set_title(f'φ_w(z) at (x={X[ix]*1e6:.2f} μm, y={Y[iy]*1e6:.2f} μm)')
+                ax.set_title(title)
                 ax.grid(True, alpha=0.3)
                 ax.set_ylim(-0.05, 1.05)
 
@@ -3278,19 +3323,19 @@ if TKINTER_AVAILABLE:
 
                 # 統計情報
                 stats_text = f"\nStatistics:\n"
-                stats_text += f"  φ_w(z=0):   {phi_w_z[0]:.6f}\n"
-                stats_text += f"  φ_w(z=max): {phi_w_z[-1]:.6f}\n"
-                stats_text += f"  min:        {phi_w_z.min():.6f}\n"
-                stats_text += f"  max:        {phi_w_z.max():.6f}\n"
-                stats_text += f"  mean:       {phi_w_z.mean():.6f}\n"
+                stats_text += f"  φ_w({stats_labels[0]}):  {profile_data[0]:.6f}\n"
+                stats_text += f"  φ_w({stats_labels[1]}): {profile_data[-1]:.6f}\n"
+                stats_text += f"  min:        {profile_data.min():.6f}\n"
+                stats_text += f"  max:        {profile_data.max():.6f}\n"
+                stats_text += f"  mean:       {profile_data.mean():.6f}\n"
 
                 stats_label = ttk.Label(profile_window, text=stats_text, font=('Courier', 9))
                 stats_label.pack(pady=5)
 
                 canvas.draw()
 
-            except ValueError:
-                messagebox.showerror("Error", "Invalid x or y coordinate. Please enter numbers.")
+            except ValueError as e:
+                messagebox.showerror("Error", f"Invalid coordinate value: {e}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to show line profile: {e}")
 
