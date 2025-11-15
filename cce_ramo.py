@@ -1419,12 +1419,13 @@ def compute_cce_ramo_drift(
     - 電子: 表面電極（z=z_surface）に向かってドリフト
     - 正孔: 裏面電極（z=0）に向かってドリフト
 
-    バルク電界（z < Z_field.min()）は一様電界モデルで近似：
-    表面電極付近の平均電位から V を推定し、E_bulk = V / z_surface とする。
+    バルク電界（z < Z_field.min()）の外挿：
+    境界値（Z_field[0]）の電界を使用して、(x, y) 位置依存性を保持。
+    これにより、一様電界近似よりも現実的な電界分布を再現。
 
     修正履歴：
     - ドリフト距離を d_i = z_i に修正（collect電極 z=0 までの距離）
-    - バルク電界を一様電界モデルで推定
+    - バルク電界を境界値外挿に改善（位置依存性を保持）
     """
     # 総e-hペア数と生成電荷
     N_i = dE_seg / W_EH
@@ -1437,19 +1438,13 @@ def compute_cce_ramo_drift(
     # 誘導電荷の計算（N_i個のキャリア分を直接計算）
     Q_induced = 0.0
 
-    # バルク領域の電界推定（一様電界モデル）
-    # 表面付近（Z_field範囲）の電位データから V_bias を推定
-    # 簡易推定: E_z の平均 * 距離
-    if len(Z_field) > 0 and len(Ez) > 0:
-        E_z_surface_avg = np.abs(Ez).mean()
-        V_estimate = E_z_surface_avg * (z_surface - Z_field[0])
-        E_bulk = V_estimate / z_surface if z_surface > 0 else 2.3e5  # [V/m]
-    else:
-        # デフォルト: 100 V / 430 µm ≈ 2.3e5 V/m
-        E_bulk = 2.3e5  # [V/m]
+    # バルク領域（z < Z_field.min()）の電界補間用キャッシュ
+    # 境界値（Z_field[0]）の電界を使用して位置依存性を保つ
+    E_bulk_cache = {}  # (x_event, y_event) → (Ex, Ey, Ez) at Z_field[0]
 
-    # バルク領域のφ_w近似値（裏面に最も近い値を使用）
-    phi_w_bulk_cache = {}  # (x_event, y_event) → φ_w at Z.min()
+    # バルク領域のφ_w外挿用キャッシュ
+    # 境界値（Z[0]）の重み電位を使用
+    phi_w_bulk_cache = {}  # (x_event, y_event) → φ_w at Z[0]
 
     for i in range(len(z_seg)):
         # セグメント i の生成位置
@@ -1465,8 +1460,15 @@ def compute_cce_ramo_drift(
             E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
         else:
             # z が電界データの範囲外（バルク領域）
-            # 【修正】一様電界モデルで近似
-            E_mag = E_bulk  # [V/m]
+            # 改善: 境界値（Z_field[0]）の電界を使用（位置依存性を保つ）
+            if (x_event, y_event) not in E_bulk_cache:
+                Ex_boundary = trilinear_interpolate(Ex, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
+                Ey_boundary = trilinear_interpolate(Ey, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
+                Ez_boundary = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
+                E_bulk_cache[(x_event, y_event)] = (Ex_boundary, Ey_boundary, Ez_boundary)
+
+            Ex_i, Ey_i, Ez_i = E_bulk_cache[(x_event, y_event)]
+            E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
 
         # 重み電位（生成位置）
         if z_i >= Z[0] and z_i <= Z[-1]:
@@ -1474,7 +1476,7 @@ def compute_cce_ramo_drift(
             phi_w_start = trilinear_interpolate(phi_w, X, Y, Z, x_event, y_event, z_i)
         else:
             # 範囲外（バルク領域、z < Z.min()）
-            # → Z.min() 位置のφ_wで近似
+            # 境界値（Z[0]）の重み電位を使用（位置依存性を保持）
             if (x_event, y_event) not in phi_w_bulk_cache:
                 phi_w_bulk_cache[(x_event, y_event)] = trilinear_interpolate(
                     phi_w, X, Y, Z, x_event, y_event, Z[0]
