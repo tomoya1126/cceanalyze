@@ -2891,20 +2891,38 @@ if TKINTER_AVAILABLE:
                 row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
             )
             row += 1
-    
-            # Z slice selection (Combobox instead of slider)
-            ttk.Label(control_frame, text="Z Slice [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+
+            # Cross-section axis selection
+            ttk.Label(control_frame, text="Cross-section axis:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.slice_axis_var = tk.StringVar(value="z")
+            axis_combo = ttk.Combobox(
+                control_frame,
+                textvariable=self.slice_axis_var,
+                values=["x", "y", "z"],
+                state="readonly",
+                width=10
+            )
+            axis_combo.bind("<<ComboboxSelected>>", self.on_axis_change)
+            axis_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
             row += 1
 
-            self.z_combo_var = tk.StringVar()
-            self.z_combo = ttk.Combobox(
-                control_frame,
-                textvariable=self.z_combo_var,
-                state="readonly",
-                width=25
+            # Slice position (numeric input)
+            ttk.Label(control_frame, text="Slice position [μm]:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            self.slice_position_var = tk.StringVar(value="430")
+            slice_entry = ttk.Entry(control_frame, textvariable=self.slice_position_var, width=15)
+            slice_entry.bind("<Return>", lambda e: self.update_weighting_plot())
+            slice_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+
+            # Update button
+            ttk.Button(control_frame, text="Update Plot", command=self.update_weighting_plot).grid(
+                row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5
             )
-            self.z_combo.bind("<<ComboboxSelected>>", self.update_weighting_plot)
-            self.z_combo.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=2)
+            row += 1
+
+            # Position range info (will be updated when data is loaded)
+            self.slice_range_label = ttk.Label(control_frame, text="Range: --", foreground="gray")
+            self.slice_range_label.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
             row += 1
     
             # Display type
@@ -3064,15 +3082,10 @@ if TKINTER_AVAILABLE:
                     'E_wy': E_wy,
                     'E_wz': E_wz,
                 }
-    
-                # Z Comboboxを更新
-                nz = len(Z)
-                z_values = [f"{Z[k]*1e6:.2f}" for k in range(nz)]
-                self.z_combo['values'] = z_values
-                self.z_combo.current(nz-1)  # デフォルトは表面
 
+                # 範囲情報を更新して初期プロット
                 self.weight_status.config(text=f"Loaded: {detector_type}, Grid: {len(X)}x{len(Y)}x{len(Z)}", foreground="green")
-                self.update_weighting_plot()
+                self.on_axis_change()  # 範囲情報を更新してプロットを描画
     
             except FileNotFoundError as e:
                 messagebox.showerror("Error", f"File not found: {e}")
@@ -3081,18 +3094,43 @@ if TKINTER_AVAILABLE:
                 messagebox.showerror("Error", f"Failed to load data: {e}")
                 self.weight_status.config(text="Load failed", foreground="red")
     
+        def on_axis_change(self, *args):
+            """軸が変更されたときに範囲情報を更新"""
+            if self.weight_data is None:
+                return
+
+            axis = self.slice_axis_var.get()
+            X = self.weight_data['X']
+            Y = self.weight_data['Y']
+            Z = self.weight_data['Z']
+
+            if axis == 'x':
+                min_val = X[0] * 1e6
+                max_val = X[-1] * 1e6
+                # デフォルト位置を中央に設定
+                self.slice_position_var.set(f"{(min_val + max_val) / 2:.1f}")
+            elif axis == 'y':
+                min_val = Y[0] * 1e6
+                max_val = Y[-1] * 1e6
+                self.slice_position_var.set(f"{(min_val + max_val) / 2:.1f}")
+            else:  # z
+                min_val = Z[0] * 1e6
+                max_val = Z[-1] * 1e6
+                self.slice_position_var.set(f"{Z[-1] * 1e6:.1f}")  # デフォルトは表面
+
+            self.slice_range_label.config(text=f"Range: [{min_val:.1f}, {max_val:.1f}] μm")
+            self.update_weighting_plot()
+
         def update_weighting_plot(self, *args):
-            """ウェイティングプロットを更新"""
+            """ウェイティングプロットを更新（x, y, z軸の断面に対応）"""
             if self.weight_data is None:
                 return
 
             try:
-                # Comboboxから選択されたインデックスを取得
-                selected = self.z_combo.current()
-                if selected < 0:
-                    return  # 何も選択されていない
-
-                iz = selected
+                # 設定を取得
+                axis = self.slice_axis_var.get()
+                position_um = float(self.slice_position_var.get())
+                position_m = position_um * 1e-6
                 display_type = self.display_var.get()
 
                 phi_w = self.weight_data['phi_w']
@@ -3100,43 +3138,90 @@ if TKINTER_AVAILABLE:
                 Y = self.weight_data['Y']
                 Z = self.weight_data['Z']
 
-                # データ取得
-                if display_type == "phi_w":
-                    data = phi_w[iz, :, :]
-                    title = f"Weighting Potential φ_w at z={Z[iz]*1e6:.2f} μm"
-                    cmap = 'viridis'
-                elif display_type == "|E_w|":
-                    E_wx = self.weight_data['E_wx']
-                    E_wy = self.weight_data['E_wy']
-                    E_wz = self.weight_data['E_wz']
-                    data = np.sqrt(E_wx[iz, :, :]**2 + E_wy[iz, :, :]**2 + E_wz[iz, :, :]**2)
-                    title = f"|E_w| at z={Z[iz]*1e6:.2f} μm"
-                    cmap = 'hot'
+                # 指定位置に最も近いインデックスを見つける
+                if axis == 'x':
+                    idx = np.argmin(np.abs(X - position_m))
+                    actual_pos = X[idx] * 1e6
+
+                    if display_type == "phi_w":
+                        data = phi_w[:, :, idx]  # (nz, ny)
+                        title = f"φ_w at x={actual_pos:.2f} μm"
+                        cmap = 'viridis'
+                    else:  # |E_w|
+                        E_wx = self.weight_data['E_wx']
+                        E_wy = self.weight_data['E_wy']
+                        E_wz = self.weight_data['E_wz']
+                        data = np.sqrt(E_wx[:, :, idx]**2 + E_wy[:, :, idx]**2 + E_wz[:, :, idx]**2)
+                        title = f"|E_w| at x={actual_pos:.2f} μm"
+                        cmap = 'hot'
+
+                    extent = [Y[0]*1e6, Y[-1]*1e6, Z[0]*1e6, Z[-1]*1e6]
+                    xlabel = 'y [μm]'
+                    ylabel = 'z [μm]'
+
+                elif axis == 'y':
+                    idx = np.argmin(np.abs(Y - position_m))
+                    actual_pos = Y[idx] * 1e6
+
+                    if display_type == "phi_w":
+                        data = phi_w[:, idx, :]  # (nz, nx)
+                        title = f"φ_w at y={actual_pos:.2f} μm"
+                        cmap = 'viridis'
+                    else:  # |E_w|
+                        E_wx = self.weight_data['E_wx']
+                        E_wy = self.weight_data['E_wy']
+                        E_wz = self.weight_data['E_wz']
+                        data = np.sqrt(E_wx[:, idx, :]**2 + E_wy[:, idx, :]**2 + E_wz[:, idx, :]**2)
+                        title = f"|E_w| at y={actual_pos:.2f} μm"
+                        cmap = 'hot'
+
+                    extent = [X[0]*1e6, X[-1]*1e6, Z[0]*1e6, Z[-1]*1e6]
+                    xlabel = 'x [μm]'
+                    ylabel = 'z [μm]'
+
+                else:  # z
+                    idx = np.argmin(np.abs(Z - position_m))
+                    actual_pos = Z[idx] * 1e6
+
+                    if display_type == "phi_w":
+                        data = phi_w[idx, :, :]  # (ny, nx)
+                        title = f"φ_w at z={actual_pos:.2f} μm"
+                        cmap = 'viridis'
+                    else:  # |E_w|
+                        E_wx = self.weight_data['E_wx']
+                        E_wy = self.weight_data['E_wy']
+                        E_wz = self.weight_data['E_wz']
+                        data = np.sqrt(E_wx[idx, :, :]**2 + E_wy[idx, :, :]**2 + E_wz[idx, :, :]**2)
+                        title = f"|E_w| at z={actual_pos:.2f} μm"
+                        cmap = 'hot'
+
+                    extent = [X[0]*1e6, X[-1]*1e6, Y[0]*1e6, Y[-1]*1e6]
+                    xlabel = 'x [μm]'
+                    ylabel = 'y [μm]'
 
                 # プロット
                 self.weight_ax.clear()
                 im = self.weight_ax.imshow(
                     data,
-                    extent=[X[0]*1e6, X[-1]*1e6, Y[0]*1e6, Y[-1]*1e6],
+                    extent=extent,
                     origin='lower',
                     cmap=cmap,
                     aspect='auto'
                 )
-                self.weight_ax.set_xlabel('x [μm]')
-                self.weight_ax.set_ylabel('y [μm]')
+                self.weight_ax.set_xlabel(xlabel)
+                self.weight_ax.set_ylabel(ylabel)
                 self.weight_ax.set_title(title)
 
                 # Colorbarの更新（図が小さくなる問題を修正）
-                # 既存のcolorbarがあれば更新、なければ新規作成
                 if hasattr(self, 'weight_colorbar') and self.weight_colorbar is not None:
-                    # 既存のcolorbarを更新（axesサイズを維持）
                     self.weight_colorbar.update_normal(im)
                 else:
-                    # 新規作成
                     self.weight_colorbar = self.weight_fig.colorbar(im, ax=self.weight_ax)
 
                 self.weight_canvas.draw()
 
+            except ValueError as e:
+                messagebox.showerror("Input Error", f"Invalid slice position: {e}")
             except Exception as e:
                 print(f"Plot update error: {e}")
 
