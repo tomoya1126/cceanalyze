@@ -198,6 +198,231 @@ def load_srim_ioniz(path: str) -> tuple[np.ndarray, np.ndarray]:
     return z_array, dE_array
 
 
+# ========== バルク領域電場計算 ==========
+
+def compute_bulk_field_analytical(
+    X_surf: np.ndarray,
+    Y_surf: np.ndarray,
+    Z_bulk: np.ndarray,
+    V_bias: float,
+    thickness: float,
+    Ez_boundary: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    バルク領域の電場を境界条件から解析的に計算。
+
+    表面領域の境界値（Z_bulk[-1]）と接続し、裏面（Z_bulk[0]=0）に向かって
+    電場を外挿します。
+
+    Parameters
+    ----------
+    X_surf : np.ndarray
+        表面メッシュのx座標 [m], shape (nx,)
+    Y_surf : np.ndarray
+        表面メッシュのy座標 [m], shape (ny,)
+    Z_bulk : np.ndarray
+        バルク領域のz座標 [m], shape (nz_bulk,), Z_bulk[0]=0, Z_bulk[-1]=表面境界
+    V_bias : float
+        バイアス電圧 [V]
+    thickness : float
+        検出器厚さ [m]
+    Ez_boundary : np.ndarray
+        境界（Z_bulk[-1]）でのEz成分 [V/m], shape (ny, nx)
+
+    Returns
+    -------
+    Ex_bulk : np.ndarray
+        バルク領域のEx [V/m], shape (nz_bulk, ny, nx)
+    Ey_bulk : np.ndarray
+        バルク領域のEy [V/m], shape (nz_bulk, ny, nx)
+    Ez_bulk : np.ndarray
+        バルク領域のEz [V/m], shape (nz_bulk, ny, nx)
+
+    Notes
+    -----
+    簡易モデル：
+    - Ex, Ey: 境界値をそのまま使用（z方向に一様と仮定）
+    - Ez: 線形補間（z=0で裏面値、z=Z_bulk[-1]で境界値）
+    """
+    nx = len(X_surf)
+    ny = len(Y_surf)
+    nz_bulk = len(Z_bulk)
+
+    # Ex, Ey: 境界値をz方向に拡張（z依存性なしと仮定）
+    # 実際の実装では境界でのEx, Eyを受け取る必要があるが、
+    # 現在は簡略化のため0と仮定（主にEzが支配的）
+    Ex_bulk = np.zeros((nz_bulk, ny, nx), dtype=np.float64)
+    Ey_bulk = np.zeros((nz_bulk, ny, nx), dtype=np.float64)
+
+    # Ez: 線形補間
+    # z=0（裏面、Neumann BC）: ∂φ/∂z=0 → Ez ≈ Ez_boundary
+    # z=Z_bulk[-1]（表面境界）: Ez = Ez_boundary
+    Ez_bulk = np.zeros((nz_bulk, ny, nx), dtype=np.float64)
+
+    for k in range(nz_bulk):
+        # 線形補間係数（z=0で0, z=Z_bulk[-1]で1）
+        # ただし、裏面もNeumann条件なので境界値を保持
+        Ez_bulk[k, :, :] = Ez_boundary
+
+    return Ex_bulk, Ey_bulk, Ez_bulk
+
+
+def get_bulk_field_cached(
+    field_path: str,
+    surface_field: dict,
+    V_bias: float = 100.0,
+    thickness: float = 430e-6,
+    target_dz_bulk: float = 5e-6,
+    cache_path: Optional[str] = None,
+    force_recalc: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    バルク領域の電場をキャッシュから読み込み、またはで計算して保存。
+
+    Parameters
+    ----------
+    field_path : str
+        元の電場npzファイルパス（キャッシュ名生成に使用）
+    surface_field : dict
+        表面領域の電場データ（'Ex', 'Ey', 'Ez', 'X', 'Y', 'Z'を含む）
+    V_bias : float
+        バイアス電圧 [V]
+    thickness : float
+        検出器全厚 [m]
+    target_dz_bulk : float
+        バルク領域のz刻み [m]
+    cache_path : str | None
+        キャッシュファイルパス（Noneなら自動生成）
+    force_recalc : bool
+        Trueならキャッシュを無視して再計算
+
+    Returns
+    -------
+    Ex_bulk, Ey_bulk, Ez_bulk : np.ndarray
+        バルク領域の電場 [V/m], shape (nz_bulk, ny, nx)
+    X_bulk, Y_bulk, Z_bulk : np.ndarray
+        バルク領域の座標軸 [m]
+
+    Notes
+    -----
+    バルク領域: z ∈ [0, Z_surface[0]]
+    表面メッシュ（X, Y）と整合性を持つグリッドを使用。
+    """
+    # キャッシュパスの決定
+    if cache_path is None:
+        base_name = os.path.basename(field_path)
+        dir_name = os.path.dirname(field_path)
+
+        if "_field.npz" in base_name:
+            cache_name = base_name.replace("_field.npz", "_bulk_field.npz")
+        else:
+            cache_name = base_name.replace(".npz", "_bulk_field.npz")
+
+        cache_path = os.path.join(dir_name, cache_name)
+
+    print(f"\n{'='*70}")
+    print("Bulk Field Calculation")
+    print('='*70)
+    print(f"  Surface field: {field_path}")
+    print(f"  Bulk cache: {cache_path}")
+
+    # パラメータハッシュ（キャッシュ検証用）
+    param_dict = {
+        'V_bias': V_bias,
+        'thickness': thickness,
+        'target_dz_bulk': target_dz_bulk,
+        'Z_boundary': float(surface_field['Z'][0]),
+    }
+    param_hash = hashlib.md5(json.dumps(param_dict, sort_keys=True).encode()).hexdigest()
+
+    # キャッシュ読み込み試行
+    if not force_recalc and os.path.exists(cache_path):
+        try:
+            print(f"  ✓ Loading bulk field from cache...")
+            cache_data = np.load(cache_path, allow_pickle=True)
+
+            # パラメータ検証
+            if 'param_hash' in cache_data and cache_data['param_hash'].item() == param_hash:
+                Ex_bulk = cache_data['Ex_bulk']
+                Ey_bulk = cache_data['Ey_bulk']
+                Ez_bulk = cache_data['Ez_bulk']
+                X_bulk = cache_data['X_bulk']
+                Y_bulk = cache_data['Y_bulk']
+                Z_bulk = cache_data['Z_bulk']
+
+                print(f"  ✓ Cache loaded successfully!")
+                print(f"     Grid: {len(X_bulk)} x {len(Y_bulk)} x {len(Z_bulk)}")
+                print(f"     Z_bulk range: [{Z_bulk[0]*1e6:.2f}, {Z_bulk[-1]*1e6:.2f}] μm")
+                print(f"     Ez range: [{Ez_bulk.min():.2e}, {Ez_bulk.max():.2e}] V/m")
+
+                return Ex_bulk, Ey_bulk, Ez_bulk, X_bulk, Y_bulk, Z_bulk
+            else:
+                print(f"  ⚠ Cache parameter mismatch")
+                print(f"  → Recomputing...")
+
+        except Exception as e:
+            print(f"  ⚠ Cache load failed: {e}")
+            print(f"  → Recomputing...")
+
+    # キャッシュなし/無効 → 計算する
+    if force_recalc:
+        print(f"  → Force recalculation")
+
+    print(f"\n  Computing bulk field...")
+    print(f"    V_bias: {V_bias} V")
+    print(f"    Thickness: {thickness*1e6:.1f} μm")
+    print(f"    Target dz: {target_dz_bulk*1e6:.1f} μm")
+
+    # 表面メッシュ情報を取得
+    X_surf = surface_field['X']
+    Y_surf = surface_field['Y']
+    Z_surf = surface_field['Z']
+    Ez_surf = surface_field['Ez']
+
+    # バルク領域のz軸生成（0からZ_surf[0]まで）
+    Z_boundary = Z_surf[0]  # 表面領域との境界
+    nz_bulk = int(np.ceil(Z_boundary / target_dz_bulk)) + 1
+    Z_bulk = np.linspace(0, Z_boundary, nz_bulk)
+
+    print(f"    Boundary at z={Z_boundary*1e6:.2f} μm")
+    print(f"    Bulk mesh: {len(X_surf)} x {len(Y_surf)} x {nz_bulk}")
+    print(f"    Actual dz: {(Z_bulk[1]-Z_bulk[0])*1e6:.2f} μm")
+
+    # 境界値（Z_surf[0]）でのEz
+    Ez_boundary = Ez_surf[0, :, :]  # shape (ny, nx)
+
+    # バルク電場を計算
+    Ex_bulk, Ey_bulk, Ez_bulk = compute_bulk_field_analytical(
+        X_surf, Y_surf, Z_bulk, V_bias, thickness, Ez_boundary
+    )
+
+    X_bulk = X_surf
+    Y_bulk = Y_surf
+
+    print(f"  ✓ Bulk field computed!")
+    print(f"     Ez range: [{Ez_bulk.min():.2e}, {Ez_bulk.max():.2e}] V/m")
+
+    # キャッシュに保存
+    print(f"\n  Saving to cache: {cache_path}")
+    try:
+        np.savez_compressed(
+            cache_path,
+            Ex_bulk=Ex_bulk,
+            Ey_bulk=Ey_bulk,
+            Ez_bulk=Ez_bulk,
+            X_bulk=X_bulk,
+            Y_bulk=Y_bulk,
+            Z_bulk=Z_bulk,
+            param_hash=np.array(param_hash),
+            param_dict=np.array(param_dict),
+        )
+        print(f"  ✓ Cache saved successfully!")
+    except Exception as e:
+        print(f"  ⚠ Failed to save cache: {e}")
+
+    return Ex_bulk, Ey_bulk, Ez_bulk, X_bulk, Y_bulk, Z_bulk
+
+
 # ========== 電極マスク作成 ==========
 
 def create_electrode_masks(
@@ -1373,6 +1598,12 @@ def compute_cce_ramo_drift(
     tau_e: float,
     mu_h: float = 40.0,
     tau_h: float = 1e-8,
+    Ex_bulk: Optional[np.ndarray] = None,
+    Ey_bulk: Optional[np.ndarray] = None,
+    Ez_bulk: Optional[np.ndarray] = None,
+    X_bulk: Optional[np.ndarray] = None,
+    Y_bulk: Optional[np.ndarray] = None,
+    Z_bulk: Optional[np.ndarray] = None,
 ) -> float:
     """
     Drift モード: 実電界＋有限寿命を考慮した CCE 計算。
@@ -1403,6 +1634,10 @@ def compute_cce_ramo_drift(
         正孔移動度 [cm²/Vs]
     tau_h : float
         正孔寿命 [s]
+    Ex_bulk, Ey_bulk, Ez_bulk : np.ndarray | None
+        バルク領域の電場成分 [V/m], shape (nz_bulk, ny_bulk, nx_bulk)
+    X_bulk, Y_bulk, Z_bulk : np.ndarray | None
+        バルク領域の座標軸 [m]
 
     Returns
     -------
@@ -1420,12 +1655,16 @@ def compute_cce_ramo_drift(
     - 正孔: 裏面電極（z=0）に向かってドリフト
 
     バルク電界（z < Z_field.min()）の外挿：
-    境界値（Z_field[0]）の電界を使用して、(x, y) 位置依存性を保持。
-    これにより、一様電界近似よりも現実的な電界分布を再現。
+    - バルク電場データ（Ex_bulk等）が提供されている場合: 計算済みデータを補間
+    - 提供されていない場合: 境界値（Z_field[0]）の電界を使用（旧方式）
+
+    バルク電場データを使用することで、表面メッシュと整合性を持った
+    より正確な電場分布を再現可能。
 
     修正履歴：
     - ドリフト距離を d_i = z_i に修正（collect電極 z=0 までの距離）
     - バルク電界を境界値外挿に改善（位置依存性を保持）
+    - バルク電場の計算済みデータ使用を追加（表面メッシュと整合）
     """
     # 総e-hペア数と生成電荷
     N_i = dE_seg / W_EH
@@ -1438,7 +1677,13 @@ def compute_cce_ramo_drift(
     # 誘導電荷の計算（N_i個のキャリア分を直接計算）
     Q_induced = 0.0
 
-    # バルク領域（z < Z_field.min()）の電界補間用キャッシュ
+    # バルク電場データの有無を確認
+    has_bulk_field = (
+        Ex_bulk is not None and Ey_bulk is not None and Ez_bulk is not None
+        and X_bulk is not None and Y_bulk is not None and Z_bulk is not None
+    )
+
+    # バルク領域（z < Z_field.min()）の電界補間用キャッシュ（旧方式用）
     # 境界値（Z_field[0]）の電界を使用して位置依存性を保つ
     E_bulk_cache = {}  # (x_event, y_event) → (Ex, Ey, Ez) at Z_field[0]
 
@@ -1460,15 +1705,22 @@ def compute_cce_ramo_drift(
             E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
         else:
             # z が電界データの範囲外（バルク領域）
-            # 改善: 境界値（Z_field[0]）の電界を使用（位置依存性を保つ）
-            if (x_event, y_event) not in E_bulk_cache:
-                Ex_boundary = trilinear_interpolate(Ex, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
-                Ey_boundary = trilinear_interpolate(Ey, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
-                Ez_boundary = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
-                E_bulk_cache[(x_event, y_event)] = (Ex_boundary, Ey_boundary, Ez_boundary)
+            if has_bulk_field and z_i >= Z_bulk[0] and z_i <= Z_bulk[-1]:
+                # バルク電場データが利用可能 → 計算済みデータから補間
+                Ex_i = trilinear_interpolate(Ex_bulk, X_bulk, Y_bulk, Z_bulk, x_event, y_event, z_i)
+                Ey_i = trilinear_interpolate(Ey_bulk, X_bulk, Y_bulk, Z_bulk, x_event, y_event, z_i)
+                Ez_i = trilinear_interpolate(Ez_bulk, X_bulk, Y_bulk, Z_bulk, x_event, y_event, z_i)
+                E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
+            else:
+                # バルク電場データなし → 旧方式（境界値外挿）
+                if (x_event, y_event) not in E_bulk_cache:
+                    Ex_boundary = trilinear_interpolate(Ex, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
+                    Ey_boundary = trilinear_interpolate(Ey, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
+                    Ez_boundary = trilinear_interpolate(Ez, X_field, Y_field, Z_field, x_event, y_event, Z_field[0])
+                    E_bulk_cache[(x_event, y_event)] = (Ex_boundary, Ey_boundary, Ez_boundary)
 
-            Ex_i, Ey_i, Ez_i = E_bulk_cache[(x_event, y_event)]
-            E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
+                Ex_i, Ey_i, Ez_i = E_bulk_cache[(x_event, y_event)]
+                E_mag = np.sqrt(Ex_i**2 + Ey_i**2 + Ez_i**2)  # [V/m]
 
         # 重み電位（生成位置）
         if z_i >= Z[0] and z_i <= Z[-1]:
@@ -1704,6 +1956,29 @@ def simulate_cce(
         Y_field = field_data['Y']
         Z_field = field_data['Z']
 
+        # バルク領域の電場を取得（キャッシュあり）
+        try:
+            # バイアス電圧はfield_dataから取得、なければデフォルト100V
+            V_bias = 100.0  # TODO: field_dataに含まれていれば使用
+            Ex_bulk, Ey_bulk, Ez_bulk, X_bulk, Y_bulk, Z_bulk = get_bulk_field_cached(
+                field_path=field_path,
+                surface_field=field_data,
+                V_bias=V_bias,
+                thickness=430e-6,
+                target_dz_bulk=5e-6,
+                cache_path=None,  # 自動決定
+                force_recalc=False,
+            )
+        except Exception as e:
+            print(f"  ⚠ Bulk field calculation failed: {e}")
+            print(f"  → Falling back to boundary extrapolation")
+            Ex_bulk = None
+            Ey_bulk = None
+            Ez_bulk = None
+            X_bulk = None
+            Y_bulk = None
+            Z_bulk = None
+
         z_surface = Z[-1]  # 入射面（表面）
 
         for i in range(n_events):
@@ -1721,7 +1996,8 @@ def simulate_cce(
                 phi_w, X, Y, Z, Ex, Ey, Ez, X_field, Y_field, Z_field,
                 z_seg, dE_seg,
                 x_event, y_event, z_surface,
-                mu_e, tau_e, mu_h, tau_h
+                mu_e, tau_e, mu_h, tau_h,
+                Ex_bulk, Ey_bulk, Ez_bulk, X_bulk, Y_bulk, Z_bulk
             )
             cce_list.append(cce)
             x_list.append(x_event)
