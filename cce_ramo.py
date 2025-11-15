@@ -1429,6 +1429,9 @@ def compute_cce_ramo_drift(
     バルク電界（z < Z_field.min()）の処理：
     - 境界値（Z_field[0]）の電界を使用して位置依存性を保持
     """
+    # デバッグ用：phi_w 配列全体の範囲を出力
+    print(f"[DEBUG] phi_w range: {phi_w.min():.4f} .. {phi_w.max():.4f}")
+
     # 定数：電場の最小閾値（これ以下の電場では寄与を無視）
     E_MIN = 1e3  # [V/m]
 
@@ -1488,13 +1491,17 @@ def compute_cce_ramo_drift(
         if z_i >= Z[0] and z_i <= Z[-1]:
             # 範囲内 → 補間
             phi_w_start = trilinear_interpolate(phi_w, X, Y, Z, x_i, y_i, z_i)
+            # φ_w を 0〜1 にクリップ（負のCCEを防ぐ）
+            phi_w_start = float(np.clip(phi_w_start, 0.0, 1.0))
         else:
             # 範囲外（バルク領域、z < Z.min()）
             # 境界値（Z[0]）の重み電位を使用（位置依存性を保持）
             if (x_event, y_event) not in phi_w_bulk_cache:
-                phi_w_bulk_cache[(x_event, y_event)] = trilinear_interpolate(
+                phi_w_boundary = trilinear_interpolate(
                     phi_w, X, Y, Z, x_event, y_event, Z[0]
                 )
+                # φ_w を 0〜1 にクリップ（負のCCEを防ぐ）
+                phi_w_bulk_cache[(x_event, y_event)] = float(np.clip(phi_w_boundary, 0.0, 1.0))
             phi_w_start = phi_w_bulk_cache[(x_event, y_event)]
 
         # 生成位置ベクトル
@@ -1524,6 +1531,8 @@ def compute_cce_ramo_drift(
             z_end_e >= Z[0] and z_end_e <= Z[-1]):
             # 終点の重み電位を補間
             phi_w_end_e = trilinear_interpolate(phi_w, X, Y, Z, x_end_e, y_end_e, z_end_e)
+            # φ_w を 0〜1 にクリップ（負のCCEを防ぐ）
+            phi_w_end_e = float(np.clip(phi_w_end_e, 0.0, 1.0))
         else:
             # 範囲外の場合は、境界値を使用するか、寄与をゼロにする
             # ここでは簡単のため、z が表面を超えた場合は φ_w = 1.0、
@@ -1532,6 +1541,8 @@ def compute_cce_ramo_drift(
             y_clipped = np.clip(y_end_e, Y[0], Y[-1])
             z_clipped = np.clip(z_end_e, Z[0], Z[-1])
             phi_w_end_e = trilinear_interpolate(phi_w, X, Y, Z, x_clipped, y_clipped, z_clipped)
+            # φ_w を 0〜1 にクリップ（負のCCEを防ぐ）
+            phi_w_end_e = float(np.clip(phi_w_end_e, 0.0, 1.0))
 
         # Shockley-Ramo: 誘起電荷（f_survival を使わない）
         Q_e_i = N_i[i] * Q_E * (phi_w_end_e - phi_w_start)
@@ -1561,12 +1572,16 @@ def compute_cce_ramo_drift(
             z_end_h >= Z[0] and z_end_h <= Z[-1]):
             # 終点の重み電位を補間
             phi_w_end_h = trilinear_interpolate(phi_w, X, Y, Z, x_end_h, y_end_h, z_end_h)
+            # φ_w を 0〜1 にクリップ（負のCCEを防ぐ）
+            phi_w_end_h = float(np.clip(phi_w_end_h, 0.0, 1.0))
         else:
             # 範囲外の場合は、境界値を使用
             x_clipped = np.clip(x_end_h, X[0], X[-1])
             y_clipped = np.clip(y_end_h, Y[0], Y[-1])
             z_clipped = np.clip(z_end_h, Z[0], Z[-1])
             phi_w_end_h = trilinear_interpolate(phi_w, X, Y, Z, x_clipped, y_clipped, z_clipped)
+            # φ_w を 0〜1 にクリップ（負のCCEを防ぐ）
+            phi_w_end_h = float(np.clip(phi_w_end_h, 0.0, 1.0))
 
         # Shockley-Ramo: 誘起電荷（f_survival を使わない）
         Q_h_i = N_i[i] * Q_E * (phi_w_start - phi_w_end_h)
@@ -1574,6 +1589,9 @@ def compute_cce_ramo_drift(
 
     # CCE = 収集電荷 / 生成電荷
     cce = Q_induced / Q_gen if Q_gen > 0 else 0.0
+
+    # 最終的なCCEも0〜1にクリップ（念のため）
+    cce = float(np.clip(cce, 0.0, 1.0))
 
     return cce
 
