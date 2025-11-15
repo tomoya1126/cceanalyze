@@ -2027,6 +2027,10 @@ def simulate_cce(
             'max': 0.0,
             'n_events': 0,
             'stopped': stopped,
+            'V_electrode': None,
+            'X_electrode': None,
+            'Y_electrode': None,
+            'Z_electrode': None,
         }
 
     mean_cce = cce_array.mean()
@@ -2042,6 +2046,22 @@ def simulate_cce(
     print(f"  Min CCE: {cce_array.min():.4f}")
     print(f"  Max CCE: {cce_array.max():.4f}")
 
+    # 電極形状表示用に電位データを返す
+    V_electrode = None
+    X_electrode = None
+    Y_electrode = None
+    Z_electrode = None
+    if mode == "ramo_drift":
+        try:
+            # 電位データを読み込み（電極形状表示用）
+            if 'V' in field_data and field_data['V'] is not None:
+                V_electrode = field_data['V']
+                X_electrode = field_data['X']
+                Y_electrode = field_data['Y']
+                Z_electrode = field_data['Z']
+        except Exception as e:
+            print(f"  ⚠ Failed to load electrode data: {e}")
+
     return {
         'cce_list': cce_list,
         'x_list': x_list,
@@ -2052,6 +2072,10 @@ def simulate_cce(
         'max': cce_array.max(),
         'n_events': len(cce_list),
         'stopped': stopped,
+        'V_electrode': V_electrode,
+        'X_electrode': X_electrode,
+        'Y_electrode': Y_electrode,
+        'Z_electrode': Z_electrode,
     }
 
 
@@ -2086,6 +2110,11 @@ def plot_cce_map(
     output_file: Optional[str] = None,
     nx: int = 50,
     ny: int = 50,
+    V: Optional[np.ndarray] = None,
+    X_electrode: Optional[np.ndarray] = None,
+    Y_electrode: Optional[np.ndarray] = None,
+    Z_electrode: Optional[np.ndarray] = None,
+    z_surface: float = 430e-6,
 ) -> None:
     """
     (x, y)位置ごとの平均CCEマップを描画。
@@ -2104,6 +2133,12 @@ def plot_cce_map(
         x方向のグリッド数
     ny : int
         y方向のグリッド数
+    V : np.ndarray | None
+        電位分布 [V], shape (nz, ny, nx)（電極形状表示用）
+    X_electrode, Y_electrode, Z_electrode : np.ndarray | None
+        電位分布の座標軸 [m]（電極形状表示用）
+    z_surface : float
+        電極面のz座標 [m]
     """
     # Noneを除外（ramo_idealモードの場合）
     valid_indices = [
@@ -2177,6 +2212,56 @@ def plot_cce_map(
         fontsize=14
     )
     ax.set_aspect('equal', adjustable='box')
+
+    # 電極形状の重ね描き
+    if V is not None and X_electrode is not None and Y_electrode is not None and Z_electrode is not None:
+        try:
+            # 電極マスクを作成
+            collect_mask, ground_mask, k_surface = create_electrode_masks(
+                V, Z_electrode, z_surface=z_surface, eps=1.0
+            )
+
+            # 表面（k_surface）の電極マスクを取得
+            collect_2d = collect_mask[k_surface, :, :]  # shape (ny, nx)
+            ground_2d = ground_mask[k_surface, :, :]
+
+            # 電極の境界線を抽出（contour）
+            X_grid, Y_grid = np.meshgrid(X_electrode * 1e6, Y_electrode * 1e6)
+
+            # Collect電極の境界線（赤）
+            if collect_2d.sum() > 0:
+                ax.contour(
+                    X_grid, Y_grid, collect_2d.astype(float),
+                    levels=[0.5],
+                    colors='red',
+                    linewidths=2,
+                    linestyles='-',
+                )
+                # ラベル追加（最初の1点のみ）
+                collect_coords = np.where(collect_2d)
+                if len(collect_coords[0]) > 0:
+                    ax.plot([], [], 'r-', linewidth=2, label='Collect electrode')
+
+            # Ground電極の境界線（青）
+            if ground_2d.sum() > 0:
+                ax.contour(
+                    X_grid, Y_grid, ground_2d.astype(float),
+                    levels=[0.5],
+                    colors='blue',
+                    linewidths=2,
+                    linestyles='-',
+                )
+                # ラベル追加
+                ground_coords = np.where(ground_2d)
+                if len(ground_coords[0]) > 0:
+                    ax.plot([], [], 'b-', linewidth=2, label='Ground electrode')
+
+            # 凡例を追加
+            if collect_2d.sum() > 0 or ground_2d.sum() > 0:
+                ax.legend(loc='upper right', fontsize=10)
+
+        except Exception as e:
+            print(f"  ⚠ Failed to overlay electrode shapes: {e}")
 
     plt.tight_layout()
 
@@ -2320,7 +2405,14 @@ def save_simulation_results(
     # 4. CCE空間マップを画像で保存（ramo_driftモードのみ）
     if x_list and y_list and any(x is not None for x in x_list):
         cce_map_file = os.path.join(output_dir, "cce_map.png")
-        plot_cce_map(x_list, y_list, cce_list, output_file=cce_map_file)
+        plot_cce_map(
+            x_list, y_list, cce_list,
+            output_file=cce_map_file,
+            V=results.get('V_electrode'),
+            X_electrode=results.get('X_electrode'),
+            Y_electrode=results.get('Y_electrode'),
+            Z_electrode=results.get('Z_electrode'),
+        )
     else:
         print("Skipped CCE map (requires ramo_drift mode)")
 
@@ -3019,8 +3111,15 @@ if TKINTER_AVAILABLE:
                     )
                     return
 
-                # CCEマップを描画（別ウィンドウ表示）
-                plot_cce_map(x_list, y_list, cce_list, output_file=None)
+                # CCEマップを描画（別ウィンドウ表示、電極形状も重ねる）
+                plot_cce_map(
+                    x_list, y_list, cce_list,
+                    output_file=None,
+                    V=self.last_results.get('V_electrode'),
+                    X_electrode=self.last_results.get('X_electrode'),
+                    Y_electrode=self.last_results.get('Y_electrode'),
+                    Z_electrode=self.last_results.get('Z_electrode'),
+                )
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to show CCE map: {e}")
