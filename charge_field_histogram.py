@@ -14,8 +14,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from typing import Optional, Tuple
 import threading
-import multiprocessing as mp
-from functools import partial
 
 # ========== 物理定数 ==========
 E_PAIR = 7.8  # eV - 電子正孔対生成エネルギー
@@ -125,7 +123,7 @@ class ChargeFieldAnalyzer:
         self.srim = srim_data
         self.results = None
 
-    def calculate_all_positions(self, progress_callback=None, n_cores=1) -> np.ndarray:
+    def calculate_all_positions(self, progress_callback=None) -> np.ndarray:
         """
         全(x,y)位置について計算を実行
 
@@ -133,8 +131,6 @@ class ChargeFieldAnalyzer:
         ----------
         progress_callback : callable, optional
             進捗報告用のコールバック関数 (current, total, message)
-        n_cores : int
-            使用するコア数（1の場合はシーケンシャル処理）
 
         Returns
         -------
@@ -147,38 +143,16 @@ class ChargeFieldAnalyzer:
         results = np.zeros((ny, nx))
         total_positions = nx * ny
 
-        if n_cores == 1:
-            # シーケンシャル処理
-            for iy in range(ny):
-                for ix in range(nx):
-                    value = self._calculate_single_position(ix, iy)
-                    results[iy, ix] = value
+        # 各(x,y)位置について計算
+        for iy in range(ny):
+            for ix in range(nx):
+                value = self._calculate_single_position(ix, iy)
+                results[iy, ix] = value
 
-                    current = iy * nx + ix + 1
-                    if progress_callback is not None:
-                        progress_callback(current, total_positions,
-                                        f"Position ({ix+1}/{nx}, {iy+1}/{ny})")
-        else:
-            # 並列処理
-            # 全ての(ix, iy)のペアを作成
-            positions = [(ix, iy) for iy in range(ny) for ix in range(nx)]
-
-            # 並列処理用の関数
-            calc_func = partial(_calculate_position_wrapper,
-                              field_data=self.field,
-                              srim_data=self.srim)
-
-            # プロセスプールで並列計算
-            with mp.Pool(processes=n_cores) as pool:
-                completed = 0
-                for i, value in enumerate(pool.imap(calc_func, positions)):
-                    ix, iy = positions[i]
-                    results[iy, ix] = value
-
-                    completed += 1
-                    if progress_callback is not None:
-                        progress_callback(completed, total_positions,
-                                        f"Position ({ix+1}/{nx}, {iy+1}/{ny})")
+                current = iy * nx + ix + 1
+                if progress_callback is not None:
+                    progress_callback(current, total_positions,
+                                    f"Position ({ix+1}/{nx}, {iy+1}/{ny})")
 
         self.results = results
         return results
@@ -244,69 +218,6 @@ class ChargeFieldAnalyzer:
         return integral_sum
 
 
-def _calculate_position_wrapper(pos_tuple, field_data, srim_data):
-    """
-    並列処理用のラッパー関数
-
-    Parameters
-    ----------
-    pos_tuple : tuple
-        (ix, iy) のタプル
-    field_data : FieldData
-        電界データ
-    srim_data : SRIMData
-        SRIMデータ
-
-    Returns
-    -------
-    float
-        計算結果
-    """
-    ix, iy = pos_tuple
-
-    # z軸は上から下（z_max → z_min）に入射
-    z_surface = field_data.Z[-1]  # z_max（検出器上面）
-
-    # z方向について積分
-    integral_sum = 0.0
-
-    # SRIMデータの各深さ点について
-    for i in range(len(srim_data.depth_m)):
-        # 現在の深さ
-        depth = srim_data.depth_m[i]
-
-        # 検出器内のz座標（上面から深さ分引く）
-        z_current = z_surface - depth
-
-        # z座標が電界グリッド範囲内かチェック
-        if z_current < field_data.Z[0] or z_current > field_data.Z[-1]:
-            continue
-
-        # z座標に最も近いグリッドインデックスを見つける
-        iz = np.argmin(np.abs(field_data.Z - z_current))
-
-        # この深さでの電子正孔対密度 [pairs/Angstrom]
-        pair_density = srim_data.ionization_eV_per_angstrom[i] / E_PAIR
-
-        # dz（積分の刻み幅）[Angstrom]
-        if i < len(srim_data.depth_m) - 1:
-            dz_angstrom = srim_data.depth_angstrom[i+1] - srim_data.depth_angstrom[i]
-        else:
-            # 最後の点
-            dz_angstrom = srim_data.depth_angstrom[i] - srim_data.depth_angstrom[i-1]
-
-        # この区間での電子正孔対数 [pairs]
-        n_pairs = pair_density * dz_angstrom
-
-        # この位置(ix, iy, iz)での電界強度 [V/m]
-        E_mag = field_data.E_mag[iz, iy, ix]
-
-        # 積分に加算
-        integral_sum += n_pairs * E_mag
-
-    return integral_sum
-
-
 class ChargeFieldHistogramGUI(tk.Tk):
     """GUIアプリケーション"""
 
@@ -357,25 +268,6 @@ class ChargeFieldHistogramGUI(tk.Tk):
         ttk.Button(
             file_frame, text="Browse...", command=self.browse_srim_file
         ).grid(row=1, column=2, padx=5)
-
-        # コア数選択
-        ttk.Label(file_frame, text="CPU Cores:").grid(
-            row=2, column=0, sticky=tk.W, pady=5
-        )
-        max_cores = mp.cpu_count()
-        core_options = ["1"] + [str(i) for i in range(2, max_cores + 1)]
-        self.cores_var = tk.StringVar(value=str(max(1, max_cores // 2)))  # デフォルトは半分
-        cores_combo = ttk.Combobox(
-            file_frame,
-            textvariable=self.cores_var,
-            values=core_options,
-            state="readonly",
-            width=10
-        )
-        cores_combo.grid(row=2, column=1, sticky=tk.W, padx=10)
-        ttk.Label(file_frame, text=f"(max: {max_cores})", font=("", 8)).grid(
-            row=2, column=2, sticky=tk.W, padx=5
-        )
 
         # === ボタンエリア ===
         button_frame = ttk.Frame(main_frame)
@@ -507,12 +399,8 @@ class ChargeFieldHistogramGUI(tk.Tk):
             # Analyzerの作成
             self.analyzer = ChargeFieldAnalyzer(field_data, srim_data)
 
-            # コア数を取得
-            n_cores = int(self.cores_var.get())
-            self.log(f"\nUsing {n_cores} CPU core(s)")
-
             # 計算実行
-            self.log("Starting calculation...")
+            self.log("\nStarting calculation...")
             self.progress_bar['value'] = 0
 
             def progress_callback(current, total, message):
@@ -522,7 +410,7 @@ class ChargeFieldHistogramGUI(tk.Tk):
                 self.progress_label.config(text=f"{message} ({current}/{total})")
                 self.update_idletasks()
 
-            results = self.analyzer.calculate_all_positions(progress_callback, n_cores=n_cores)
+            results = self.analyzer.calculate_all_positions(progress_callback)
 
             self.log("\nCalculation completed!")
             self.log(f"Result shape: {results.shape}")
@@ -594,9 +482,6 @@ class ChargeFieldHistogramGUI(tk.Tk):
 
 def main():
     """メイン関数"""
-    # Windows対応のためのfreeze_support
-    mp.freeze_support()
-
     app = ChargeFieldHistogramGUI()
     app.mainloop()
 
