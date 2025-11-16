@@ -14,6 +14,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from typing import Optional, Tuple
 import threading
+import multiprocessing as mp
+from functools import partial
 
 # ========== 物理定数 ==========
 E_PAIR = 7.8  # eV - 電子正孔対生成エネルギー
@@ -31,7 +33,6 @@ class FieldData:
         field_file : str
             電界データのnpzファイルパス
         """
-        print(f"Loading field data from: {field_file}")
         data = np.load(field_file)
 
         self.X = data['X']  # 1D array [m]
@@ -44,11 +45,15 @@ class FieldData:
         # 電界強度を計算
         self.E_mag = np.sqrt(self.Ex**2 + self.Ey**2 + self.Ez**2)
 
-        print(f"  Grid size: Nx={len(self.X)}, Ny={len(self.Y)}, Nz={len(self.Z)}")
-        print(f"  X range: [{self.X.min()*1e6:.2f}, {self.X.max()*1e6:.2f}] μm")
-        print(f"  Y range: [{self.Y.min()*1e6:.2f}, {self.Y.max()*1e6:.2f}] μm")
-        print(f"  Z range: [{self.Z.min()*1e6:.2f}, {self.Z.max()*1e6:.2f}] μm")
-        print(f"  E_mag range: [{self.E_mag.min():.2e}, {self.E_mag.max():.2e}] V/m")
+    def get_info(self) -> str:
+        """データ情報を文字列で返す"""
+        info = []
+        info.append(f"Grid size: Nx={len(self.X)}, Ny={len(self.Y)}, Nz={len(self.Z)}")
+        info.append(f"X range: [{self.X.min()*1e6:.2f}, {self.X.max()*1e6:.2f}] μm")
+        info.append(f"Y range: [{self.Y.min()*1e6:.2f}, {self.Y.max()*1e6:.2f}] μm")
+        info.append(f"Z range: [{self.Z.min()*1e6:.2f}, {self.Z.max()*1e6:.2f}] μm")
+        info.append(f"E_mag range: [{self.E_mag.min():.2e}, {self.E_mag.max():.2e}] V/m")
+        return "\n".join(info)
 
 
 class SRIMData:
@@ -63,8 +68,6 @@ class SRIMData:
         srim_file : str
             SRIMデータファイルパス
         """
-        print(f"\nLoading SRIM data from: {srim_file}")
-
         # SRIMファイルの読み込み
         data = self._load_srim_file(srim_file)
 
@@ -75,9 +78,13 @@ class SRIMData:
         # 単位変換: Angstrom -> m
         self.depth_m = self.depth_angstrom * 1e-10
 
-        print(f"  Depth range: [0, {self.depth_m[-1]*1e6:.2f}] μm")
-        print(f"  Max ionization: {self.ionization_eV_per_angstrom.max():.2f} eV/Angstrom")
-        print(f"  Number of points: {len(self.depth_angstrom)}")
+    def get_info(self) -> str:
+        """データ情報を文字列で返す"""
+        info = []
+        info.append(f"Depth range: [0, {self.depth_m[-1]*1e6:.2f}] μm")
+        info.append(f"Max ionization: {self.ionization_eV_per_angstrom.max():.2f} eV/Angstrom")
+        info.append(f"Number of points: {len(self.depth_angstrom)}")
+        return "\n".join(info)
 
     def _load_srim_file(self, filename: str) -> np.ndarray:
         """SRIMファイルを読み込む（ヘッダー処理付き）"""
@@ -118,7 +125,7 @@ class ChargeFieldAnalyzer:
         self.srim = srim_data
         self.results = None
 
-    def calculate_all_positions(self, progress_callback=None) -> np.ndarray:
+    def calculate_all_positions(self, progress_callback=None, n_cores=1) -> np.ndarray:
         """
         全(x,y)位置について計算を実行
 
@@ -126,6 +133,8 @@ class ChargeFieldAnalyzer:
         ----------
         progress_callback : callable, optional
             進捗報告用のコールバック関数 (current, total, message)
+        n_cores : int
+            使用するコア数（1の場合はシーケンシャル処理）
 
         Returns
         -------
@@ -134,30 +143,42 @@ class ChargeFieldAnalyzer:
         """
         nx = len(self.field.X)
         ny = len(self.field.Y)
-        nz = len(self.field.Z)
 
         results = np.zeros((ny, nx))
-
         total_positions = nx * ny
 
-        print(f"\nCalculating charge×field product for {total_positions} positions...")
+        if n_cores == 1:
+            # シーケンシャル処理
+            for iy in range(ny):
+                for ix in range(nx):
+                    value = self._calculate_single_position(ix, iy)
+                    results[iy, ix] = value
 
-        # 各(x,y)位置について計算
-        for iy in range(ny):
-            for ix in range(nx):
-                # この(x,y)位置での計算
-                value = self._calculate_single_position(ix, iy)
-                results[iy, ix] = value
+                    current = iy * nx + ix + 1
+                    if progress_callback is not None:
+                        progress_callback(current, total_positions,
+                                        f"Position ({ix+1}/{nx}, {iy+1}/{ny})")
+        else:
+            # 並列処理
+            # 全ての(ix, iy)のペアを作成
+            positions = [(ix, iy) for iy in range(ny) for ix in range(nx)]
 
-                # 進捗報告
-                current = iy * nx + ix + 1
-                if progress_callback is not None:
-                    progress_callback(current, total_positions,
-                                    f"Position ({ix+1}/{nx}, {iy+1}/{ny})")
+            # 並列処理用の関数
+            calc_func = partial(_calculate_position_wrapper,
+                              field_data=self.field,
+                              srim_data=self.srim)
 
-                # 定期的にプリント
-                if current % 100 == 0 or current == total_positions:
-                    print(f"  Progress: {current}/{total_positions} ({current/total_positions*100:.1f}%)")
+            # プロセスプールで並列計算
+            with mp.Pool(processes=n_cores) as pool:
+                completed = 0
+                for i, value in enumerate(pool.imap(calc_func, positions)):
+                    ix, iy = positions[i]
+                    results[iy, ix] = value
+
+                    completed += 1
+                    if progress_callback is not None:
+                        progress_callback(completed, total_positions,
+                                        f"Position ({ix+1}/{nx}, {iy+1}/{ny})")
 
         self.results = results
         return results
@@ -223,6 +244,69 @@ class ChargeFieldAnalyzer:
         return integral_sum
 
 
+def _calculate_position_wrapper(pos_tuple, field_data, srim_data):
+    """
+    並列処理用のラッパー関数
+
+    Parameters
+    ----------
+    pos_tuple : tuple
+        (ix, iy) のタプル
+    field_data : FieldData
+        電界データ
+    srim_data : SRIMData
+        SRIMデータ
+
+    Returns
+    -------
+    float
+        計算結果
+    """
+    ix, iy = pos_tuple
+
+    # z軸は上から下（z_max → z_min）に入射
+    z_surface = field_data.Z[-1]  # z_max（検出器上面）
+
+    # z方向について積分
+    integral_sum = 0.0
+
+    # SRIMデータの各深さ点について
+    for i in range(len(srim_data.depth_m)):
+        # 現在の深さ
+        depth = srim_data.depth_m[i]
+
+        # 検出器内のz座標（上面から深さ分引く）
+        z_current = z_surface - depth
+
+        # z座標が電界グリッド範囲内かチェック
+        if z_current < field_data.Z[0] or z_current > field_data.Z[-1]:
+            continue
+
+        # z座標に最も近いグリッドインデックスを見つける
+        iz = np.argmin(np.abs(field_data.Z - z_current))
+
+        # この深さでの電子正孔対密度 [pairs/Angstrom]
+        pair_density = srim_data.ionization_eV_per_angstrom[i] / E_PAIR
+
+        # dz（積分の刻み幅）[Angstrom]
+        if i < len(srim_data.depth_m) - 1:
+            dz_angstrom = srim_data.depth_angstrom[i+1] - srim_data.depth_angstrom[i]
+        else:
+            # 最後の点
+            dz_angstrom = srim_data.depth_angstrom[i] - srim_data.depth_angstrom[i-1]
+
+        # この区間での電子正孔対数 [pairs]
+        n_pairs = pair_density * dz_angstrom
+
+        # この位置(ix, iy, iz)での電界強度 [V/m]
+        E_mag = field_data.E_mag[iz, iy, ix]
+
+        # 積分に加算
+        integral_sum += n_pairs * E_mag
+
+    return integral_sum
+
+
 class ChargeFieldHistogramGUI(tk.Tk):
     """GUIアプリケーション"""
 
@@ -273,6 +357,25 @@ class ChargeFieldHistogramGUI(tk.Tk):
         ttk.Button(
             file_frame, text="Browse...", command=self.browse_srim_file
         ).grid(row=1, column=2, padx=5)
+
+        # コア数選択
+        ttk.Label(file_frame, text="CPU Cores:").grid(
+            row=2, column=0, sticky=tk.W, pady=5
+        )
+        max_cores = mp.cpu_count()
+        core_options = ["1"] + [str(i) for i in range(2, max_cores + 1)]
+        self.cores_var = tk.StringVar(value=str(max(1, max_cores // 2)))  # デフォルトは半分
+        cores_combo = ttk.Combobox(
+            file_frame,
+            textvariable=self.cores_var,
+            values=core_options,
+            state="readonly",
+            width=10
+        )
+        cores_combo.grid(row=2, column=1, sticky=tk.W, padx=10)
+        ttk.Label(file_frame, text=f"(max: {max_cores})", font=("", 8)).grid(
+            row=2, column=2, sticky=tk.W, padx=5
+        )
 
         # === ボタンエリア ===
         button_frame = ttk.Frame(main_frame)
@@ -394,16 +497,22 @@ class ChargeFieldHistogramGUI(tk.Tk):
             self.log("Loading data...")
 
             field_data = FieldData(self.field_file)
-            self.log("Field data loaded successfully")
+            self.log("Field data loaded")
+            self.log(field_data.get_info())
 
             srim_data = SRIMData(self.srim_file)
-            self.log("SRIM data loaded successfully")
+            self.log("\nSRIM data loaded")
+            self.log(srim_data.get_info())
 
             # Analyzerの作成
             self.analyzer = ChargeFieldAnalyzer(field_data, srim_data)
 
+            # コア数を取得
+            n_cores = int(self.cores_var.get())
+            self.log(f"\nUsing {n_cores} CPU core(s)")
+
             # 計算実行
-            self.log("\nStarting calculation...")
+            self.log("Starting calculation...")
             self.progress_bar['value'] = 0
 
             def progress_callback(current, total, message):
@@ -413,7 +522,7 @@ class ChargeFieldHistogramGUI(tk.Tk):
                 self.progress_label.config(text=f"{message} ({current}/{total})")
                 self.update_idletasks()
 
-            results = self.analyzer.calculate_all_positions(progress_callback)
+            results = self.analyzer.calculate_all_positions(progress_callback, n_cores=n_cores)
 
             self.log("\nCalculation completed!")
             self.log(f"Result shape: {results.shape}")
@@ -485,6 +594,9 @@ class ChargeFieldHistogramGUI(tk.Tk):
 
 def main():
     """メイン関数"""
+    # Windows対応のためのfreeze_support
+    mp.freeze_support()
+
     app = ChargeFieldHistogramGUI()
     app.mainloop()
 
